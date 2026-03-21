@@ -79,6 +79,20 @@ jobs:
             fi
           fi
 
+          if [ -n "$SERVICE_ARN" ]; then
+            CURRENT_STATUS=$(aws apprunner describe-service \
+              --region "$AWS_REGION" \
+              --service-arn "$SERVICE_ARN" \
+              --query 'Service.Status' \
+              --output text)
+
+            if [ "$CURRENT_STATUS" = "OPERATION_IN_PROGRESS" ]; then
+              echo "Service already has an active App Runner operation. Waiting for the current operation instead of submitting another update."
+              echo "SERVICE_ARN=$SERVICE_ARN" >> "$GITHUB_ENV"
+              exit 0
+            fi
+          fi
+
           cat > source-config.json <<EOF
           {
             "AuthenticationConfiguration": {
