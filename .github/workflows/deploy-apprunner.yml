@@ -151,16 +151,29 @@ jobs:
           }
           EOF
 
+          cat > health-check-config.json <<EOF
+          {
+            "Protocol": "HTTP",
+            "Path": "/healthz",
+            "Interval": 10,
+            "Timeout": 5,
+            "HealthyThreshold": 1,
+            "UnhealthyThreshold": 5
+          }
+          EOF
+
           if [ -n "$SERVICE_ARN" ]; then
             aws apprunner update-service \
               --region "$AWS_REGION" \
               --service-arn "$SERVICE_ARN" \
-              --source-configuration file://source-config.json > apprunner-result.json
+              --source-configuration file://source-config.json \
+              --health-check-configuration file://health-check-config.json > apprunner-result.json
           else
             aws apprunner create-service \
               --region "$AWS_REGION" \
               --service-name "$APP_RUNNER_SERVICE_NAME" \
-              --source-configuration file://source-config.json > apprunner-result.json
+              --source-configuration file://source-config.json \
+              --health-check-configuration file://health-check-config.json > apprunner-result.json
 
             SERVICE_ARN=$(python3 -c 'import json; print(json.load(open("apprunner-result.json", "r", encoding="utf-8"))["Service"]["ServiceArn"])')
           fi
