@@ -53,7 +53,7 @@ aws sts get-caller-identity
 Then bootstrap the AWS-side roles needed by GitHub Actions and App Runner:
 
 ```powershell
-.\scripts\bootstrap-aws-apprunner.ps1 -GitHubOwner <owner> -GitHubRepo <repo> -AwsRegion us-east-1
+.\scripts\bootstrap-aws-apprunner.ps1 -GitHubOwner <owner> -GitHubRepo <repo> -AwsRegion us-east-1 -AwsProfile <your-sso-profile>
 ```
 
 That script creates or updates:

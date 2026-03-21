@@ -6,6 +6,7 @@ param(
     [Parameter(Mandatory = $true)]
     [string]$GitHubRepo,
 
+    [string]$AwsProfile = $env:AWS_PROFILE,
     [string]$AwsRegion = "us-east-1",
     [string]$DeploymentRoleName = "",
     [string]$EcrAccessRoleName = "",
@@ -15,6 +16,19 @@ param(
 
 Set-StrictMode -Version Latest
 $ErrorActionPreference = "Stop"
+
+function Write-Utf8NoBomFile {
+    param(
+        [Parameter(Mandatory = $true)]
+        [string]$Path,
+
+        [Parameter(Mandatory = $true)]
+        [string]$Content
+    )
+
+    $utf8NoBom = New-Object System.Text.UTF8Encoding($false)
+    [System.IO.File]::WriteAllText($Path, $Content, $utf8NoBom)
+}
 
 function Resolve-AwsCli {
     $candidates = @(
@@ -37,12 +51,28 @@ function Invoke-AwsJson {
         [string[]]$Arguments
     )
 
-    $output = & $script:AwsCli @Arguments
+    $output = & $script:AwsCli @script:AwsBaseArgs @Arguments
+    if ($LASTEXITCODE -ne 0) {
+        throw "AWS CLI command failed: aws $($script:AwsBaseArgs + $Arguments -join ' ')"
+    }
+
     if (-not $output) {
         return $null
     }
 
     return $output | ConvertFrom-Json
+}
+
+function Invoke-AwsRaw {
+    param(
+        [Parameter(Mandatory = $true)]
+        [string[]]$Arguments
+    )
+
+    & $script:AwsCli @script:AwsBaseArgs @Arguments
+    if ($LASTEXITCODE -ne 0) {
+        throw "AWS CLI command failed: aws $($script:AwsBaseArgs + $Arguments -join ' ')"
+    }
 }
 
 function Ensure-Role {
@@ -54,21 +84,28 @@ function Ensure-Role {
         [string]$TrustPolicyPath
     )
 
-    try {
-        $null = Invoke-AwsJson -Arguments @("iam", "get-role", "--role-name", $RoleName)
-        & $script:AwsCli iam update-assume-role-policy --role-name $RoleName --policy-document "file://$TrustPolicyPath" | Out-Null
-    } catch {
-        & $script:AwsCli iam create-role --role-name $RoleName --assume-role-policy-document "file://$TrustPolicyPath" | Out-Null
+    & $script:AwsCli @script:AwsBaseArgs "iam" "get-role" "--role-name" $RoleName 2>$null | Out-Null
+    if ($LASTEXITCODE -eq 0) {
+        Invoke-AwsRaw -Arguments @("iam", "update-assume-role-policy", "--role-name", $RoleName, "--policy-document", "file://$TrustPolicyPath") | Out-Null
+    } else {
+        Invoke-AwsRaw -Arguments @("iam", "create-role", "--role-name", $RoleName, "--assume-role-policy-document", "file://$TrustPolicyPath") | Out-Null
     }
 
     return (Invoke-AwsJson -Arguments @("iam", "get-role", "--role-name", $RoleName)).Role.Arn
 }
 
 $AwsCli = Resolve-AwsCli
+$AwsBaseArgs = @()
+if ($AwsProfile) {
+    $AwsBaseArgs += @("--profile", $AwsProfile)
+}
+if ($AwsRegion) {
+    $AwsBaseArgs += @("--region", $AwsRegion)
+}
 
 $identity = Invoke-AwsJson -Arguments @("sts", "get-caller-identity")
 if (-not $identity) {
-    throw "Unable to resolve AWS caller identity. Run 'aws configure', 'aws configure sso', or 'aws sso login' first."
+    throw "Unable to resolve AWS caller identity. Run 'aws sso login --profile <profile>' first, then pass -AwsProfile <profile> or set AWS_PROFILE."
 }
 
 $accountId = $identity.Account
@@ -87,14 +124,18 @@ if (-not $AppRunnerServiceName) {
     $AppRunnerServiceName = $GitHubRepo.ToLowerInvariant()
 }
 
-$oidcProviderArn = "arn:aws:iam::$accountId:oidc-provider/token.actions.githubusercontent.com"
-try {
-    & $AwsCli iam get-open-id-connect-provider --open-id-connect-provider-arn $oidcProviderArn | Out-Null
-} catch {
+$oidcProviderArn = "arn:aws:iam::${accountId}:oidc-provider/token.actions.githubusercontent.com"
+& $AwsCli @AwsBaseArgs "iam" "get-open-id-connect-provider" "--open-id-connect-provider-arn" $oidcProviderArn 2>$null | Out-Null
+if ($LASTEXITCODE -ne 0) {
     Write-Host "Creating GitHub Actions OIDC provider..."
-    & $AwsCli iam create-open-id-connect-provider `
-        --url "https://token.actions.githubusercontent.com" `
-        --client-id-list "sts.amazonaws.com" | Out-Null
+    Invoke-AwsRaw -Arguments @(
+        "iam",
+        "create-open-id-connect-provider",
+        "--url",
+        "https://token.actions.githubusercontent.com",
+        "--client-id-list",
+        "sts.amazonaws.com"
+    ) | Out-Null
 }
 
 $tempDir = Join-Path $env:TEMP ("apprunner-bootstrap-" + [guid]::NewGuid().ToString("N"))
@@ -113,7 +154,7 @@ try {
                 Condition = @{
                     StringEquals = @{
                         "token.actions.githubusercontent.com:aud" = "sts.amazonaws.com"
-                        "token.actions.githubusercontent.com:sub" = "repo:$repoSlug:ref:refs/heads/main"
+                        "token.actions.githubusercontent.com:sub" = "repo:${repoSlug}:ref:refs/heads/main"
                     }
                 }
             }
@@ -121,7 +162,7 @@ try {
     } | ConvertTo-Json -Depth 10
 
     $deploymentTrustPath = Join-Path $tempDir "deployment-trust.json"
-    Set-Content -Path $deploymentTrustPath -Value $deploymentTrustPolicy -Encoding utf8
+    Write-Utf8NoBomFile -Path $deploymentTrustPath -Content $deploymentTrustPolicy
     $deploymentRoleArn = Ensure-Role -RoleName $DeploymentRoleName -TrustPolicyPath $deploymentTrustPath
 
     $deploymentPolicy = @{
@@ -155,17 +196,23 @@ try {
             @{
                 Effect = "Allow"
                 Action = "iam:PassRole"
-                Resource = "arn:aws:iam::$accountId:role/$EcrAccessRoleName"
+                Resource = "arn:aws:iam::${accountId}:role/$EcrAccessRoleName"
             }
         )
     } | ConvertTo-Json -Depth 10
 
     $deploymentPolicyPath = Join-Path $tempDir "deployment-policy.json"
-    Set-Content -Path $deploymentPolicyPath -Value $deploymentPolicy -Encoding utf8
-    & $AwsCli iam put-role-policy `
-        --role-name $DeploymentRoleName `
-        --policy-name "GitHubActionsAppRunnerDeploy" `
-        --policy-document "file://$deploymentPolicyPath" | Out-Null
+    Write-Utf8NoBomFile -Path $deploymentPolicyPath -Content $deploymentPolicy
+    Invoke-AwsRaw -Arguments @(
+        "iam",
+        "put-role-policy",
+        "--role-name",
+        $DeploymentRoleName,
+        "--policy-name",
+        "GitHubActionsAppRunnerDeploy",
+        "--policy-document",
+        "file://$deploymentPolicyPath"
+    ) | Out-Null
 
     $ecrAccessTrustPolicy = @{
         Version = "2012-10-17"
@@ -181,15 +228,23 @@ try {
     } | ConvertTo-Json -Depth 10
 
     $ecrAccessTrustPath = Join-Path $tempDir "ecr-access-trust.json"
-    Set-Content -Path $ecrAccessTrustPath -Value $ecrAccessTrustPolicy -Encoding utf8
+    Write-Utf8NoBomFile -Path $ecrAccessTrustPath -Content $ecrAccessTrustPolicy
     $ecrAccessRoleArn = Ensure-Role -RoleName $EcrAccessRoleName -TrustPolicyPath $ecrAccessTrustPath
 
-    & $AwsCli iam attach-role-policy `
-        --role-name $EcrAccessRoleName `
-        --policy-arn "arn:aws:iam::aws:policy/service-role/AWSAppRunnerServicePolicyForECRAccess" | Out-Null
+    Invoke-AwsRaw -Arguments @(
+        "iam",
+        "attach-role-policy",
+        "--role-name",
+        $EcrAccessRoleName,
+        "--policy-arn",
+        "arn:aws:iam::aws:policy/service-role/AWSAppRunnerServicePolicyForECRAccess"
+    ) | Out-Null
 
     Write-Host ""
     Write-Host "AWS bootstrap complete."
+    if ($AwsProfile) {
+        Write-Host "AWS profile: $AwsProfile"
+    }
     Write-Host ""
     Write-Host "Create these GitHub repository settings:"
     Write-Host "Secret:"
