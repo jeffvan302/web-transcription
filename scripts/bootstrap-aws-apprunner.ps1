@@ -180,6 +180,19 @@ try {
             },
             @{
                 Effect = "Allow"
+                Action = "iam:CreateServiceLinkedRole"
+                Resource = "*"
+                Condition = @{
+                    StringLike = @{
+                        "iam:AWSServiceName" = @(
+                            "apprunner.amazonaws.com",
+                            "networking.apprunner.amazonaws.com"
+                        )
+                    }
+                }
+            },
+            @{
+                Effect = "Allow"
                 Action = @(
                     "ecr:BatchCheckLayerAvailability",
                     "ecr:BatchGetImage",

@@ -31,10 +31,10 @@ jobs:
           test -n "$APP_RUNNER_ECR_ACCESS_ROLE_ARN" || { echo "Missing repository variable APP_RUNNER_ECR_ACCESS_ROLE_ARN"; exit 1; }
 
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@v6
 
       - name: Configure AWS credentials
-        uses: aws-actions/configure-aws-credentials@v4
+        uses: aws-actions/configure-aws-credentials@v6
         with:
           aws-region: ${{ env.AWS_REGION }}
           role-to-assume: ${{ secrets.AWS_ROLE_ARN }}
