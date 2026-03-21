@@ -106,12 +106,7 @@ jobs:
               --service-name "$APP_RUNNER_SERVICE_NAME" \
               --source-configuration file://source-config.json > apprunner-result.json
 
-            SERVICE_ARN=$(python3 - <<'PY'
-import json
-with open("apprunner-result.json", "r", encoding="utf-8") as handle:
-    print(json.load(handle)["Service"]["ServiceArn"])
-PY
-)
+            SERVICE_ARN=$(python3 -c 'import json; print(json.load(open("apprunner-result.json", "r", encoding="utf-8"))["Service"]["ServiceArn"])')
           fi
 
           echo "SERVICE_ARN=$SERVICE_ARN" >> "$GITHUB_ENV"
