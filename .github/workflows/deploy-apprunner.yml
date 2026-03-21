@@ -1,0 +1,163 @@
+name: Deploy To App Runner
+
+on:
+  push:
+    branches:
+      - main
+  workflow_dispatch:
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      id-token: write
+    env:
+      AWS_REGION: ${{ vars.AWS_REGION }}
+      ECR_REPOSITORY: ${{ vars.ECR_REPOSITORY }}
+      APP_RUNNER_SERVICE_NAME: ${{ vars.APP_RUNNER_SERVICE_NAME }}
+      APP_RUNNER_SERVICE_ARN: ${{ vars.APP_RUNNER_SERVICE_ARN }}
+      APP_RUNNER_ECR_ACCESS_ROLE_ARN: ${{ vars.APP_RUNNER_ECR_ACCESS_ROLE_ARN }}
+      APP_RUNNER_PORT: ${{ vars.APP_RUNNER_PORT }}
+
+    steps:
+      - name: Validate configuration
+        run: |
+          set -euo pipefail
+          test -n "${{ secrets.AWS_ROLE_ARN }}" || { echo "Missing secret AWS_ROLE_ARN"; exit 1; }
+          test -n "$AWS_REGION" || { echo "Missing repository variable AWS_REGION"; exit 1; }
+          test -n "$ECR_REPOSITORY" || { echo "Missing repository variable ECR_REPOSITORY"; exit 1; }
+          test -n "$APP_RUNNER_SERVICE_NAME" || { echo "Missing repository variable APP_RUNNER_SERVICE_NAME"; exit 1; }
+          test -n "$APP_RUNNER_ECR_ACCESS_ROLE_ARN" || { echo "Missing repository variable APP_RUNNER_ECR_ACCESS_ROLE_ARN"; exit 1; }
+
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-region: ${{ env.AWS_REGION }}
+          role-to-assume: ${{ secrets.AWS_ROLE_ARN }}
+
+      - name: Login to Amazon ECR
+        id: ecr
+        uses: aws-actions/amazon-ecr-login@v2
+
+      - name: Ensure ECR repository exists
+        run: |
+          set -euo pipefail
+          aws ecr describe-repositories --repository-names "$ECR_REPOSITORY" --region "$AWS_REGION" >/dev/null 2>&1 || \
+          aws ecr create-repository \
+            --repository-name "$ECR_REPOSITORY" \
+            --region "$AWS_REGION" \
+            --image-scanning-configuration scanOnPush=true >/dev/null
+
+      - name: Build and push image
+        env:
+          REGISTRY: ${{ steps.ecr.outputs.registry }}
+        run: |
+          set -euo pipefail
+          IMAGE_URI="$REGISTRY/$ECR_REPOSITORY:${GITHUB_SHA}"
+          echo "IMAGE_URI=$IMAGE_URI" >> "$GITHUB_ENV"
+          docker build -t "$IMAGE_URI" .
+          docker push "$IMAGE_URI"
+
+      - name: Create or update App Runner service
+        run: |
+          set -euo pipefail
+
+          PORT="${APP_RUNNER_PORT:-80}"
+          SERVICE_ARN="${APP_RUNNER_SERVICE_ARN:-}"
+
+          if [ -z "$SERVICE_ARN" ]; then
+            SERVICE_ARN=$(aws apprunner list-services \
+              --region "$AWS_REGION" \
+              --query "ServiceSummaryList[?ServiceName=='$APP_RUNNER_SERVICE_NAME'].ServiceArn | [0]" \
+              --output text)
+            if [ "$SERVICE_ARN" = "None" ]; then
+              SERVICE_ARN=""
+            fi
+          fi
+
+          cat > source-config.json <<EOF
+          {
+            "AuthenticationConfiguration": {
+              "AccessRoleArn": "${APP_RUNNER_ECR_ACCESS_ROLE_ARN}"
+            },
+            "AutoDeploymentsEnabled": false,
+            "ImageRepository": {
+              "ImageIdentifier": "${IMAGE_URI}",
+              "ImageRepositoryType": "ECR",
+              "ImageConfiguration": {
+                "Port": "${PORT}"
+              }
+            }
+          }
+          EOF
+
+          if [ -n "$SERVICE_ARN" ]; then
+            aws apprunner update-service \
+              --region "$AWS_REGION" \
+              --service-arn "$SERVICE_ARN" \
+              --source-configuration file://source-config.json > apprunner-result.json
+          else
+            aws apprunner create-service \
+              --region "$AWS_REGION" \
+              --service-name "$APP_RUNNER_SERVICE_NAME" \
+              --source-configuration file://source-config.json > apprunner-result.json
+
+            SERVICE_ARN=$(python3 - <<'PY'
+import json
+with open("apprunner-result.json", "r", encoding="utf-8") as handle:
+    print(json.load(handle)["Service"]["ServiceArn"])
+PY
+)
+          fi
+
+          echo "SERVICE_ARN=$SERVICE_ARN" >> "$GITHUB_ENV"
+
+      - name: Wait for App Runner to become running
+        run: |
+          set -euo pipefail
+
+          for attempt in $(seq 1 60); do
+            STATUS=$(aws apprunner describe-service \
+              --region "$AWS_REGION" \
+              --service-arn "$SERVICE_ARN" \
+              --query 'Service.Status' \
+              --output text)
+
+            SERVICE_URL=$(aws apprunner describe-service \
+              --region "$AWS_REGION" \
+              --service-arn "$SERVICE_ARN" \
+              --query 'Service.ServiceUrl' \
+              --output text)
+
+            echo "Attempt $attempt: $STATUS"
+
+            if [ "$STATUS" = "RUNNING" ]; then
+              echo "APP_RUNNER_URL=https://$SERVICE_URL" >> "$GITHUB_ENV"
+              exit 0
+            fi
+
+            if [ "$STATUS" = "CREATE_FAILED" ] || [ "$STATUS" = "DELETE_FAILED" ]; then
+              echo "App Runner entered failure state: $STATUS" >&2
+              exit 1
+            fi
+
+            sleep 10
+          done
+
+          echo "Timed out waiting for App Runner to become RUNNING" >&2
+          exit 1
+
+      - name: Deployment summary
+        run: |
+          {
+            echo "## App Runner Deployment"
+            echo ""
+            echo "- Service name: \`$APP_RUNNER_SERVICE_NAME\`"
+            echo "- Service ARN: \`$SERVICE_ARN\`"
+            echo "- Image URI: \`$IMAGE_URI\`"
+            echo "- URL: ${APP_RUNNER_URL:-pending}"
+          } >> "$GITHUB_STEP_SUMMARY"
