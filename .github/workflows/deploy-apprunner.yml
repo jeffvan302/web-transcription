@@ -18,7 +18,7 @@ jobs:
       APP_RUNNER_SERVICE_NAME: ${{ vars.APP_RUNNER_SERVICE_NAME }}
       APP_RUNNER_SERVICE_ARN: ${{ vars.APP_RUNNER_SERVICE_ARN }}
       APP_RUNNER_ECR_ACCESS_ROLE_ARN: ${{ vars.APP_RUNNER_ECR_ACCESS_ROLE_ARN }}
-      APP_RUNNER_PORT: ${{ vars.APP_RUNNER_PORT }}
+      APP_RUNNER_PORT: "3000"
 
     steps:
       - name: Validate configuration
@@ -66,8 +66,21 @@ jobs:
         run: |
           set -euo pipefail
 
-          PORT="${APP_RUNNER_PORT:-80}"
+          PORT="${APP_RUNNER_PORT:-3000}"
           SERVICE_ARN="${APP_RUNNER_SERVICE_ARN:-}"
+
+          if [ -n "$SERVICE_ARN" ]; then
+            CURRENT_STATUS=$(aws apprunner describe-service \
+              --region "$AWS_REGION" \
+              --service-arn "$SERVICE_ARN" \
+              --query 'Service.Status' \
+              --output text 2>/dev/null || true)
+
+            if [ -z "$CURRENT_STATUS" ] || [ "$CURRENT_STATUS" = "None" ]; then
+              echo "Configured App Runner ARN no longer exists. Falling back to service discovery by name."
+              SERVICE_ARN=""
+            fi
+          fi
 
           if [ -z "$SERVICE_ARN" ]; then
             SERVICE_ARN=$(aws apprunner list-services \
@@ -90,6 +103,35 @@ jobs:
               echo "Service already has an active App Runner operation. Waiting for the current operation instead of submitting another update."
               echo "SERVICE_ARN=$SERVICE_ARN" >> "$GITHUB_ENV"
               exit 0
+            fi
+
+            if [ "$CURRENT_STATUS" = "CREATE_FAILED" ] || [ "$CURRENT_STATUS" = "DELETE_FAILED" ]; then
+              echo "Service is in $CURRENT_STATUS. Deleting it and creating a fresh App Runner service."
+              aws apprunner delete-service \
+                --region "$AWS_REGION" \
+                --service-arn "$SERVICE_ARN" >/dev/null
+
+              for delete_attempt in $(seq 1 60); do
+                DELETE_STATUS=$(aws apprunner describe-service \
+                  --region "$AWS_REGION" \
+                  --service-arn "$SERVICE_ARN" \
+                  --query 'Service.Status' \
+                  --output text 2>/dev/null || true)
+
+                if [ -z "$DELETE_STATUS" ] || [ "$DELETE_STATUS" = "None" ]; then
+                  break
+                fi
+
+                echo "Waiting for failed service cleanup: $DELETE_STATUS"
+                sleep 10
+              done
+
+              if [ -n "$DELETE_STATUS" ] && [ "$DELETE_STATUS" != "None" ]; then
+                echo "Timed out waiting for failed service cleanup." >&2
+                exit 1
+              fi
+
+              SERVICE_ARN=""
             fi
           fi
 

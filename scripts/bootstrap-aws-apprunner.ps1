@@ -268,7 +268,7 @@ try {
     Write-Host "  ECR_REPOSITORY=$EcrRepository"
     Write-Host "  APP_RUNNER_SERVICE_NAME=$AppRunnerServiceName"
     Write-Host "  APP_RUNNER_ECR_ACCESS_ROLE_ARN=$ecrAccessRoleArn"
-    Write-Host "  APP_RUNNER_PORT=80"
+    Write-Host "  APP_RUNNER_PORT=3000"
     Write-Host ""
     Write-Host "Optional variable:"
     Write-Host "  APP_RUNNER_SERVICE_ARN=<leave blank for first deploy>"

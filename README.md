@@ -76,7 +76,7 @@ Variables:
 - `ECR_REPOSITORY`
 - `APP_RUNNER_SERVICE_NAME`
 - `APP_RUNNER_ECR_ACCESS_ROLE_ARN`
-- `APP_RUNNER_PORT`
+- `APP_RUNNER_PORT` = `3000`
 - `APP_RUNNER_SERVICE_ARN` (optional, leave blank for the first deploy)
 
 ## Deploy
