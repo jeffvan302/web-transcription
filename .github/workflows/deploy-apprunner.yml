@@ -115,7 +115,7 @@ jobs:
         run: |
           set -euo pipefail
 
-          for attempt in $(seq 1 60); do
+          for attempt in $(seq 1 90); do
             STATUS=$(aws apprunner describe-service \
               --region "$AWS_REGION" \
               --service-arn "$SERVICE_ARN" \
@@ -140,10 +140,14 @@ jobs:
               exit 1
             fi
 
-            sleep 10
+            sleep 20
           done
 
           echo "Timed out waiting for App Runner to become RUNNING" >&2
+          aws apprunner describe-service \
+            --region "$AWS_REGION" \
+            --service-arn "$SERVICE_ARN" \
+            --output json >&2
           exit 1
 
       - name: Deployment summary
