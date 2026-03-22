@@ -292,9 +292,9 @@ h3 {
   position: relative;
   z-index: 1;
   display: grid;
-  grid-template-columns: auto 1fr auto;
+  grid-template-columns: minmax(180px, auto) 1fr auto;
   gap: 1rem;
-  align-items: start;
+  align-items: center;
   padding: 1rem 1.2rem;
   margin-bottom: 1rem;
   background: rgba(9, 14, 21, 0.74);
@@ -310,6 +310,10 @@ h3 {
   gap: 0.2rem;
 }
 
+.topbar-main {
+  min-width: 0;
+}
+
 .toolbar-grid,
 .view-switch,
 .button-row,
@@ -320,12 +324,50 @@ h3 {
   align-items: end;
 }
 
+.topbar-actions {
+  justify-content: center;
+}
+
 .button-row.stack {
   display: grid;
 }
 
 .user-chip {
   justify-items: end;
+}
+
+.user-chip-inline {
+  justify-items: start;
+}
+
+.topbar-menu-shell {
+  position: relative;
+  justify-self: end;
+}
+
+.topbar-menu {
+  position: absolute;
+  top: calc(100% + 0.75rem);
+  right: 0;
+  display: grid;
+  gap: 0.85rem;
+  width: min(360px, calc(100vw - 2rem));
+  padding: 1rem;
+  background: rgba(11, 18, 27, 0.96);
+  border: 1px solid var(--line-strong);
+  border-radius: 24px;
+  box-shadow: var(--shadow);
+  backdrop-filter: blur(22px);
+}
+
+.topbar-menu .toolbar-button,
+.topbar-menu .field {
+  width: 100%;
+}
+
+.topbar-menu-group {
+  display: grid;
+  gap: 0.7rem;
 }
 
 .user-chip small,
@@ -352,6 +394,10 @@ h3 {
   grid-template-columns: minmax(250px, 0.95fr) minmax(0, 1.7fr) minmax(300px, 1fr);
   gap: 1rem;
   min-height: calc(100vh - 11.2rem);
+}
+
+.workspace-grid.library-collapsed {
+  grid-template-columns: 124px minmax(0, 1.85fr) minmax(300px, 1fr);
 }
 
 .panel,
@@ -406,6 +452,17 @@ h3 {
 .title-card {
   display: grid;
   gap: 0.5rem;
+  text-align: left;
+}
+
+.library-panel.collapsed {
+  overflow: hidden;
+}
+
+.collapsed-library-summary {
+  display: grid;
+  gap: 0.8rem;
+  align-content: start;
   text-align: left;
 }
 
@@ -701,6 +758,14 @@ h3 {
     grid-template-columns: 1fr;
   }
 
+  .topbar-actions {
+    justify-content: start;
+  }
+
+  .topbar-menu-shell {
+    justify-self: start;
+  }
+
   .user-chip {
     justify-items: start;
   }
@@ -716,6 +781,10 @@ h3 {
   .app-shell,
   .login-shell {
     padding: 1rem;
+  }
+
+  .workspace-grid.library-collapsed {
+    grid-template-columns: 1fr;
   }
 
   .phrase-head,

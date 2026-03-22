@@ -279,6 +279,8 @@ export default function App() {
   const [waveWindowSeconds, setWaveWindowSeconds] = useState(12);
   const [wavePan, setWavePan] = useState(0);
   const [dragState, setDragState] = useState<DragState>(null);
+  const [topMenuOpen, setTopMenuOpen] = useState(false);
+  const [libraryCollapsed, setLibraryCollapsed] = useState(false);
   const [timingDraft, setTimingDraft] = useState({ start: "0.00", end: "0.00" });
   const [saveInFlight, setSaveInFlight] = useState(false);
   const [mediaTitle, setMediaTitle] = useState("");
@@ -315,6 +317,7 @@ export default function App() {
   const textareaRef = useRef<HTMLTextAreaElement | null>(null);
   const waveformRef = useRef<SVGSVGElement | null>(null);
   const audioRef = useRef<HTMLAudioElement | null>(null);
+  const topMenuRef = useRef<HTMLDivElement | null>(null);
   const asrImportInputRef = useRef<HTMLInputElement | null>(null);
   const seenTerminalJobsRef = useRef<Set<string>>(new Set());
   const appStateRef = useRef<PersistedState>(EMPTY_STATE);
@@ -389,6 +392,23 @@ export default function App() {
   useEffect(() => {
     selectedPhraseRef.current = selectedPhrase;
   }, [selectedPhrase]);
+
+  useEffect(() => {
+    if (!topMenuOpen) {
+      return;
+    }
+
+    const handlePointerDown = (event: PointerEvent) => {
+      if (!topMenuRef.current?.contains(event.target as Node)) {
+        setTopMenuOpen(false);
+      }
+    };
+
+    window.addEventListener("pointerdown", handlePointerDown);
+    return () => {
+      window.removeEventListener("pointerdown", handlePointerDown);
+    };
+  }, [topMenuOpen]);
 
   useEffect(() => {
     setUserDrafts((current) => {
@@ -1183,6 +1203,17 @@ export default function App() {
       return false;
     }
     return true;
+  }
+
+  function switchView(view: View) {
+    setTopMenuOpen(false);
+    updateState((current) => ({ ...current, currentView: view }));
+    if (view === "shared") {
+      postStatus("info", "Shared library refreshed and ready for collaborative actions.");
+    }
+    if (view === "editor") {
+      postStatus("info", "Editor ready.");
+    }
   }
 
   async function login() {
@@ -2148,26 +2179,30 @@ export default function App() {
       <div className="background-orb background-orb-right" />
 
       <header className="topbar">
-        <div className="brand-block">
+        <div className="brand-block topbar-main">
           <div className="eyebrow">yt-asr Browser Workspace</div>
           <strong>{selectedWorkspace?.name || appState.workspaceName || "Workspace"}</strong>
         </div>
 
-        <div className="toolbar-grid">
-          <label className="field compact">
-            <span>Workspace</span>
-            <select
-              value={appState.selectedWorkspaceId}
-              onChange={(event) => void selectWorkspace(event.target.value)}
-              disabled={passwordChangeRequired || appState.workspaces.length === 0}
+        <div className="toolbar-grid topbar-actions">
+          <div className="view-switch">
+            <button
+              className={`toolbar-button ${appState.currentView === "editor" ? "selected-view" : ""}`}
+              onClick={() => switchView("editor")}
+              type="button"
+              disabled={passwordChangeRequired}
             >
-              {appState.workspaces.map((workspace) => (
-                <option key={workspace.id} value={workspace.id}>
-                  {workspace.name}
-                </option>
-              ))}
-            </select>
-          </label>
+              Editor
+            </button>
+            <button
+              className={`toolbar-button ${appState.currentView === "shared" ? "selected-view" : ""}`}
+              onClick={() => switchView("shared")}
+              type="button"
+              disabled={passwordChangeRequired}
+            >
+              Cloud / Library
+            </button>
+          </div>
           <button className="toolbar-button" onClick={reloadLibrary} type="button">
             Reload
           </button>
@@ -2179,111 +2214,187 @@ export default function App() {
           >
             Save
           </button>
-          <button
-            className="toolbar-button"
-            onClick={() => handleExport("current")}
-            type="button"
-            disabled={!selectedTitle || passwordChangeRequired}
-          >
-            Export Current
-          </button>
-          <button className="toolbar-button" onClick={() => handleExport("all")} type="button" disabled={passwordChangeRequired}>
-            Export All
-          </button>
-          <button className="toolbar-button" onClick={() => handleExport("pack")} type="button" disabled={passwordChangeRequired}>
-            Pack .asr
-          </button>
-          <button className="toolbar-button" onClick={() => handleExport("import")} type="button" disabled={passwordChangeRequired}>
-            Import .asr
-          </button>
-          <div className="view-switch">
-            {(["editor", "shared", "settings"] as View[]).map((view) => (
-              <button
-                key={view}
-                className={`toolbar-button ${appState.currentView === view ? "selected-view" : ""}`}
-                onClick={() => {
-                  updateState((current) => ({ ...current, currentView: view }));
-                  if (view === "shared") {
-                    postStatus("info", "Shared library refreshed and ready for collaborative actions.");
-                  }
-                }}
-                type="button"
-                disabled={passwordChangeRequired && view !== "settings"}
-              >
-                {view === "editor" ? "Editor" : view === "shared" ? "Cloud / Library" : currentUser.role === "admin" ? "Account / Admin" : "Account"}
-              </button>
-            ))}
-          </div>
-          <label className="field compact">
-            <span>Language</span>
-            <select
-              value={appState.importLanguage}
-              onChange={(event) => updateState((current) => ({ ...current, importLanguage: event.target.value }))}
-            >
-              {LANGUAGES.map((language) => (
-                <option key={language} value={language}>
-                  {language}
-                </option>
-              ))}
-            </select>
-          </label>
-          <button
-            className="toolbar-button primary"
-            onClick={() => updateState((current) => ({ ...current, currentView: "shared" }))}
-            type="button"
-            disabled={passwordChangeRequired}
-          >
-            Imports
-          </button>
-          <button className="toolbar-button" onClick={() => createImportedTitle("local")} type="button" disabled={passwordChangeRequired}>
-            Import Media
-          </button>
         </div>
 
-        <div className="user-chip">
-          <span>{currentUser.displayName}</span>
-          <small>{currentUser.role}</small>
-          <button className="toolbar-button" onClick={() => void logout()} type="button">
-            Logout
+        <div ref={topMenuRef} className="topbar-menu-shell">
+          <button
+            className={`toolbar-button ${topMenuOpen ? "selected-view" : ""}`}
+            onClick={() => setTopMenuOpen((current) => !current)}
+            type="button"
+          >
+            Menu
           </button>
+          {topMenuOpen ? (
+            <div className="topbar-menu">
+              <div className="user-chip user-chip-inline">
+                <span>{currentUser.displayName}</span>
+                <small>
+                  {currentUser.role} <span className="separator">/</span> {selectedWorkspace?.name || "Workspace"}
+                </small>
+              </div>
+              <button
+                className={`toolbar-button ${appState.currentView === "settings" ? "selected-view" : ""}`}
+                onClick={() => switchView("settings")}
+                type="button"
+              >
+                {currentUser.role === "admin" ? "Account / Admin" : "Account"}
+              </button>
+              <label className="field compact">
+                <span>Workspace</span>
+                <select
+                  value={appState.selectedWorkspaceId}
+                  onChange={(event) => void selectWorkspace(event.target.value)}
+                  disabled={passwordChangeRequired || appState.workspaces.length === 0}
+                >
+                  {appState.workspaces.map((workspace) => (
+                    <option key={workspace.id} value={workspace.id}>
+                      {workspace.name}
+                    </option>
+                  ))}
+                </select>
+              </label>
+              <label className="field compact">
+                <span>Language</span>
+                <select
+                  value={appState.importLanguage}
+                  onChange={(event) => updateState((current) => ({ ...current, importLanguage: event.target.value }))}
+                >
+                  {LANGUAGES.map((language) => (
+                    <option key={language} value={language}>
+                      {language}
+                    </option>
+                  ))}
+                </select>
+              </label>
+              <div className="topbar-menu-group">
+                <button className="toolbar-button primary" onClick={() => switchView("shared")} type="button" disabled={passwordChangeRequired}>
+                  Imports
+                </button>
+                <button
+                  className="toolbar-button"
+                  onClick={() => {
+                    setTopMenuOpen(false);
+                    createImportedTitle("local");
+                  }}
+                  type="button"
+                  disabled={passwordChangeRequired}
+                >
+                  Import Media
+                </button>
+              </div>
+              <div className="topbar-menu-group">
+                <button
+                  className="toolbar-button"
+                  onClick={() => {
+                    setTopMenuOpen(false);
+                    handleExport("current");
+                  }}
+                  type="button"
+                  disabled={!selectedTitle || passwordChangeRequired}
+                >
+                  Export Current
+                </button>
+                <button
+                  className="toolbar-button"
+                  onClick={() => {
+                    setTopMenuOpen(false);
+                    handleExport("all");
+                  }}
+                  type="button"
+                  disabled={passwordChangeRequired}
+                >
+                  Export All
+                </button>
+                <button
+                  className="toolbar-button"
+                  onClick={() => {
+                    setTopMenuOpen(false);
+                    handleExport("pack");
+                  }}
+                  type="button"
+                  disabled={passwordChangeRequired}
+                >
+                  Pack .asr
+                </button>
+                <button
+                  className="toolbar-button"
+                  onClick={() => {
+                    setTopMenuOpen(false);
+                    handleExport("import");
+                  }}
+                  type="button"
+                  disabled={passwordChangeRequired}
+                >
+                  Import .asr
+                </button>
+              </div>
+              <button
+                className="toolbar-button"
+                onClick={() => {
+                  setTopMenuOpen(false);
+                  void logout();
+                }}
+                type="button"
+              >
+                Logout
+              </button>
+            </div>
+          ) : null}
         </div>
       </header>
 
       <input ref={asrImportInputRef} type="file" accept=".asr,.zip" hidden onChange={handleAsrImportChange} />
 
       {appState.currentView === "editor" && selectedTitle ? (
-        <section className="workspace-grid">
-          <aside className="panel library-panel">
+        <section className={`workspace-grid ${libraryCollapsed ? "library-collapsed" : ""}`}>
+          <aside className={`panel library-panel ${libraryCollapsed ? "collapsed" : ""}`}>
             <div className="panel-header">
               <div>
                 <span className="eyebrow">Library</span>
                 <h2>Titles</h2>
               </div>
-              <span className="pill">{libraryTitles.length} items</span>
-            </div>
-
-            <div className="title-list">
-              {libraryTitles.map((title) => (
+              <div className="action-cluster">
+                {!libraryCollapsed ? <span className="pill">{libraryTitles.length} items</span> : null}
                 <button
-                  key={title.id}
-                  className={`title-card ${title.id === selectedTitle.id ? "active" : ""} ${
-                    title.checkedOutByUserId && title.checkedOutByUserId !== currentUser.id ? "locked" : ""
-                  }`}
-                  onClick={() => void selectTitle(title.id)}
+                  className="toolbar-button"
+                  onClick={() => setLibraryCollapsed((current) => !current)}
                   type="button"
                 >
-                  <div className="title-card-top">
-                    <strong>{title.title}</strong>
-                    <span className={`status-dot ${title.id === selectedTitle.id ? "live" : ""}`} />
-                  </div>
-                  <span>{title.source}</span>
-                  <div className="title-meta">
-                    <span>{getTitleStateLabel(title)}</span>
-                    <span>{title.phrases.length} phrases</span>
-                  </div>
+                  {libraryCollapsed ? "Show" : "Hide"}
                 </button>
-              ))}
+              </div>
             </div>
+
+            {libraryCollapsed ? (
+              <div className="collapsed-library-summary">
+                <span className="pill">{libraryTitles.length}</span>
+                <strong>{selectedTitle.title}</strong>
+                <span>{getTitleStateLabel(selectedTitle)}</span>
+              </div>
+            ) : (
+              <div className="title-list">
+                {libraryTitles.map((title) => (
+                  <button
+                    key={title.id}
+                    className={`title-card ${title.id === selectedTitle.id ? "active" : ""} ${
+                      title.checkedOutByUserId && title.checkedOutByUserId !== currentUser.id ? "locked" : ""
+                    }`}
+                    onClick={() => void selectTitle(title.id)}
+                    type="button"
+                  >
+                    <div className="title-card-top">
+                      <strong>{title.title}</strong>
+                      <span className={`status-dot ${title.id === selectedTitle.id ? "live" : ""}`} />
+                    </div>
+                    <span>{title.source}</span>
+                    <div className="title-meta">
+                      <span>{getTitleStateLabel(title)}</span>
+                      <span>{title.phrases.length} phrases</span>
+                    </div>
+                  </button>
+                ))}
+              </div>
+            )}
           </aside>
 
           <section className="panel editor-panel">
