@@ -2347,31 +2347,34 @@ export default function App() {
 
       {appState.currentView === "editor" && selectedTitle ? (
         <section className={`workspace-grid ${libraryCollapsed ? "library-collapsed" : ""}`}>
-          <aside className={`panel library-panel ${libraryCollapsed ? "collapsed" : ""}`}>
-            <div className="panel-header">
-              <div>
-                <span className="eyebrow">Library</span>
-                <h2>Titles</h2>
+          {libraryCollapsed ? (
+            <aside className="library-rail" aria-label="Collapsed titles panel">
+              <div className="library-rail-line" />
+              <button
+                className="library-rail-toggle"
+                onClick={() => setLibraryCollapsed(false)}
+                type="button"
+                aria-label="Show titles panel"
+                title="Show titles panel"
+              >
+                {">"}
+              </button>
+            </aside>
+          ) : (
+            <aside className="panel library-panel">
+              <div className="panel-header">
+                <div>
+                  <span className="eyebrow">Library</span>
+                  <h2>Titles</h2>
+                </div>
+                <div className="action-cluster">
+                  <span className="pill">{libraryTitles.length} items</span>
+                  <button className="toolbar-button" onClick={() => setLibraryCollapsed(true)} type="button">
+                    Hide
+                  </button>
+                </div>
               </div>
-              <div className="action-cluster">
-                {!libraryCollapsed ? <span className="pill">{libraryTitles.length} items</span> : null}
-                <button
-                  className="toolbar-button"
-                  onClick={() => setLibraryCollapsed((current) => !current)}
-                  type="button"
-                >
-                  {libraryCollapsed ? "Show" : "Hide"}
-                </button>
-              </div>
-            </div>
 
-            {libraryCollapsed ? (
-              <div className="collapsed-library-summary">
-                <span className="pill">{libraryTitles.length}</span>
-                <strong>{selectedTitle.title}</strong>
-                <span>{getTitleStateLabel(selectedTitle)}</span>
-              </div>
-            ) : (
               <div className="title-list">
                 {libraryTitles.map((title) => (
                   <button
@@ -2391,11 +2394,11 @@ export default function App() {
                       <span>{getTitleStateLabel(title)}</span>
                       <span>{title.phrases.length} phrases</span>
                     </div>
-                  </button>
-                ))}
+                    </button>
+                  ))}
               </div>
-            )}
-          </aside>
+            </aside>
+          )}
 
           <section className="panel editor-panel">
             <div className="panel-header editor-header">
