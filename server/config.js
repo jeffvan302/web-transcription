@@ -78,6 +78,13 @@ export const defaultStorageSettings = {
 
 const developmentUsers = [
   {
+    email: "admin",
+    displayName: "Administrator",
+    role: "admin",
+    password: "password",
+    mustChangePassword: true,
+  },
+  {
     email: "maya@yt-asr.local",
     displayName: "Maya Editor",
     role: "user",
@@ -97,6 +104,14 @@ const developmentUsers = [
   },
 ];
 
+const fallbackBootstrapAdmin = {
+  email: process.env.BOOTSTRAP_ADMIN_EMAIL || "admin",
+  displayName: process.env.BOOTSTRAP_ADMIN_DISPLAY_NAME || "Administrator",
+  role: "admin",
+  password: process.env.BOOTSTRAP_ADMIN_PASSWORD || "password",
+  mustChangePassword: true,
+};
+
 function parseBootstrapUsers() {
   if (process.env.BOOTSTRAP_USERS_JSON) {
     try {
@@ -112,10 +127,7 @@ function parseBootstrapUsers() {
   if (process.env.BOOTSTRAP_ADMIN_EMAIL && process.env.BOOTSTRAP_ADMIN_PASSWORD) {
     return [
       {
-        email: process.env.BOOTSTRAP_ADMIN_EMAIL,
-        displayName: process.env.BOOTSTRAP_ADMIN_DISPLAY_NAME || "Bootstrap Admin",
-        role: "admin",
-        password: process.env.BOOTSTRAP_ADMIN_PASSWORD,
+        ...fallbackBootstrapAdmin,
       },
     ];
   }
@@ -124,7 +136,7 @@ function parseBootstrapUsers() {
     return developmentUsers;
   }
 
-  return [];
+  return [fallbackBootstrapAdmin];
 }
 
 export const seededUsers = parseBootstrapUsers();

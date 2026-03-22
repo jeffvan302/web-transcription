@@ -149,13 +149,12 @@ const insertUserStatement = db.prepare(`
 `);
 
 function seedUsersIfNeeded() {
-  const existing = db.prepare("SELECT COUNT(*) AS count FROM users").get();
-  if (existing.count > 0) {
-    return;
-  }
-
   const timestamp = nowIso();
   for (const user of seededUsers) {
+    if (findUserByEmail(user.email)) {
+      continue;
+    }
+
     insertUserStatement.run({
       id: randomId("user"),
       email: user.email,
@@ -647,12 +646,13 @@ export function buildAppState(userId) {
   const selectedTitle = activeCheckout || titles[0] || null;
   const serializedTitles = titles.map((titleRow) => serializeTitleForUser(titleRow, userId));
   const selectedSerializedTitle = serializedTitles.find((title) => title.id === selectedTitle?.id) || serializedTitles[0] || null;
+  const currentUser = listUsers().find((user) => user.id === userId) || null;
 
   return {
     sessionUserId: userId,
     selectedTitleId: selectedSerializedTitle?.id || "",
     selectedPhraseIds: selectedSerializedTitle?.phrases[0] ? [selectedSerializedTitle.phrases[0].id] : [],
-    currentView: selectedSerializedTitle ? "editor" : "shared",
+    currentView: currentUser?.mustChangePassword ? "settings" : selectedSerializedTitle ? "editor" : "shared",
     youtubeUrl: "",
     importLanguage: "en",
     workspaceName: "Primary Workspace",

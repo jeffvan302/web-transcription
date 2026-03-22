@@ -50,11 +50,12 @@ Frontend runs on `http://localhost:4173` and proxies API requests to the backend
 
 In non-production mode, the database seeds these development users on first startup:
 
+- `admin` / `password`  (admin, forced to change password on first sign-in)
 - `maya@yt-asr.local` / `maya1234`
 - `jordan@yt-asr.local` / `jordan1234`
 - `theo@yt-asr.local` / `admin1234`
 
-In production, no default users are created unless you explicitly bootstrap one through environment variables such as:
+In production, a bootstrap admin account is created by default as `admin` / `password`, and it is flagged to change the password on first sign-in. You can override that bootstrap account through environment variables such as:
 
 - `BOOTSTRAP_ADMIN_EMAIL`
 - `BOOTSTRAP_ADMIN_PASSWORD`

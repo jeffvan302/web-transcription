@@ -143,12 +143,31 @@ function requireUser(req, res, next) {
     res.status(401).json({ error: "Authentication required." });
     return;
   }
+  if (
+    req.user.mustChangePassword &&
+    req.path !== "/api/state" &&
+    req.path !== "/api/auth/change-password" &&
+    req.path !== "/api/auth/logout"
+  ) {
+    res.status(403).json({
+      error: "Password change required before continuing.",
+      requiresPasswordChange: true,
+    });
+    return;
+  }
   next();
 }
 
 function requireAdmin(req, res, next) {
   if (!req.user) {
     res.status(401).json({ error: "Authentication required." });
+    return;
+  }
+  if (req.user.mustChangePassword) {
+    res.status(403).json({
+      error: "Password change required before continuing.",
+      requiresPasswordChange: true,
+    });
     return;
   }
   if (req.user.role !== "admin") {

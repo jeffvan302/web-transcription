@@ -184,8 +184,9 @@ export default function App() {
     selectedTitle?.phrases.find((phrase) => appState.selectedPhraseIds.includes(phrase.id)) ??
     selectedTitle?.phrases[0] ??
     null;
+  const passwordChangeRequired = Boolean(currentUser?.mustChangePassword);
   const editable = Boolean(currentUser && selectedTitle?.checkedOutByUserId === currentUser.id);
-  const canEdit = editable && !saveInFlight;
+  const canEdit = editable && !saveInFlight && !passwordChangeRequired;
   const viewRange = selectedTitle ? selectedTitle.duration / waveZoom : 10;
   const visibleStart = clamp(wavePan, 0, Math.max(0, (selectedTitle?.duration ?? 0) - viewRange));
   const visibleEnd = visibleStart + viewRange;
@@ -588,9 +589,14 @@ export default function App() {
 
   function applyServerResponse(response: AppStateResponse, options: { preserveView?: boolean } = {}) {
     const current = appStateRef.current;
+    const sessionUser = response.state.users.find((user) => user.id === response.state.sessionUserId) ?? null;
     const nextState: PersistedState = {
       ...response.state,
-      currentView: options.preserveView ? current.currentView : response.state.currentView,
+      currentView: sessionUser?.mustChangePassword
+        ? "settings"
+        : options.preserveView
+          ? current.currentView
+          : response.state.currentView,
       youtubeUrl: current.youtubeUrl,
       importLanguage: current.importLanguage || response.state.importLanguage,
     };
@@ -837,9 +843,12 @@ export default function App() {
       const response = await api.login(loginEmail.trim(), loginPassword);
       applyServerResponse(response);
       setLoginPassword("");
+      const signedInUser = response.state.users.find((user) => user.id === response.state.sessionUserId) ?? null;
       postStatus(
-        "success",
-        `Signed in as ${response.state.users.find((user) => user.id === response.state.sessionUserId)?.displayName ?? "user"}.`,
+        signedInUser?.mustChangePassword ? "warning" : "success",
+        signedInUser?.mustChangePassword
+          ? `Signed in as ${signedInUser.displayName}. Change the password before continuing.`
+          : `Signed in as ${signedInUser?.displayName ?? "user"}.`,
       );
     } catch (error) {
       postStatus("error", error instanceof Error ? error.message : "Sign in failed.");
@@ -1531,7 +1540,7 @@ export default function App() {
 
           <div className="login-actions">
             <label className="field">
-              <span>Email</span>
+              <span>Email or login</span>
               <input value={loginEmail} onChange={(event) => setLoginEmail(event.target.value)} />
             </label>
             <label className="field">
@@ -1552,8 +1561,8 @@ export default function App() {
             </button>
           </div>
           <p className="helper-text">
-            Development mode still seeds local test accounts on first run. Production should use an admin-created or
-            bootstrap-admin account.
+            First-use bootstrap login: <code>admin</code> / <code>password</code>. That account is forced to change its
+            password on first sign-in.
           </p>
         </section>
 
@@ -1609,16 +1618,21 @@ export default function App() {
           >
             Save
           </button>
-          <button className="toolbar-button" onClick={() => handleExport("current")} type="button" disabled={!selectedTitle}>
+          <button
+            className="toolbar-button"
+            onClick={() => handleExport("current")}
+            type="button"
+            disabled={!selectedTitle || passwordChangeRequired}
+          >
             Export Current
           </button>
-          <button className="toolbar-button" onClick={() => handleExport("all")} type="button">
+          <button className="toolbar-button" onClick={() => handleExport("all")} type="button" disabled={passwordChangeRequired}>
             Export All
           </button>
-          <button className="toolbar-button" onClick={() => handleExport("pack")} type="button">
+          <button className="toolbar-button" onClick={() => handleExport("pack")} type="button" disabled={passwordChangeRequired}>
             Pack .asr
           </button>
-          <button className="toolbar-button" onClick={() => handleExport("import")} type="button">
+          <button className="toolbar-button" onClick={() => handleExport("import")} type="button" disabled={passwordChangeRequired}>
             Import .asr
           </button>
           <div className="view-switch">
@@ -1633,6 +1647,7 @@ export default function App() {
                   }
                 }}
                 type="button"
+                disabled={passwordChangeRequired && view !== "settings"}
               >
                 {view === "editor" ? "Editor" : view === "shared" ? "Cloud / Library" : currentUser.role === "admin" ? "Account / Admin" : "Account"}
               </button>
@@ -1651,10 +1666,15 @@ export default function App() {
               ))}
             </select>
           </label>
-          <button className="toolbar-button primary" onClick={() => updateState((current) => ({ ...current, currentView: "shared" }))} type="button">
+          <button
+            className="toolbar-button primary"
+            onClick={() => updateState((current) => ({ ...current, currentView: "shared" }))}
+            type="button"
+            disabled={passwordChangeRequired}
+          >
             Imports
           </button>
-          <button className="toolbar-button" onClick={() => createImportedTitle("local")} type="button">
+          <button className="toolbar-button" onClick={() => createImportedTitle("local")} type="button" disabled={passwordChangeRequired}>
             Import Media
           </button>
         </div>

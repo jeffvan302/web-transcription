@@ -7,10 +7,11 @@ import { setTimeout as delay } from "node:timers/promises";
 import { fileURLToPath } from "node:url";
 
 const rootDir = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
-const baseUrl = process.env.SMOKE_BASE_URL || "http://127.0.0.1:3001";
+const startServer = process.argv.includes("--start-server");
+const smokePort = process.env.SMOKE_PORT || (startServer ? "3013" : "3001");
+const baseUrl = process.env.SMOKE_BASE_URL || `http://127.0.0.1:${smokePort}`;
 const email = process.env.SMOKE_EMAIL || "theo@yt-asr.local";
 const password = process.env.SMOKE_PASSWORD || "admin1234";
-const startServer = process.argv.includes("--start-server");
 
 const tempAudio = path.join(os.tmpdir(), "yt-asr-smoke.wav");
 let serverProcess = null;
@@ -40,6 +41,11 @@ async function main() {
         cwd: rootDir,
         stdio: ["ignore", "pipe", "pipe"],
         windowsHide: true,
+        env: {
+          ...process.env,
+          PORT: smokePort,
+          OPENAI_API_KEY: "",
+        },
       });
       await delay(4000);
     }
