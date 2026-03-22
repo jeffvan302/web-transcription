@@ -98,6 +98,10 @@ code,
   gap: 1.5rem;
 }
 
+.login-recovery-card {
+  margin-top: 0.25rem;
+}
+
 .spec-panel {
   display: grid;
   gap: 1.2rem;
@@ -444,8 +448,23 @@ h3 {
   cursor: grab;
 }
 
-.waveform rect:first-of-type {
+.waveform-base {
   fill: rgba(10, 17, 25, 0.92);
+}
+
+.waveform-image {
+  opacity: 0.96;
+}
+
+.waveform-empty-line {
+  stroke: rgba(138, 214, 255, 0.4);
+  stroke-width: 2;
+  stroke-dasharray: 7 5;
+}
+
+.waveform-empty-label {
+  fill: var(--muted);
+  font-size: 12px;
 }
 
 .region-fill {

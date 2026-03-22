@@ -17,7 +17,6 @@ import type {
 } from "./types";
 
 const LANGUAGES = ["en", "es", "fr", "de", "pt-BR"];
-const PRIMARY_WORKSPACE = "Primary Workspace";
 
 type PlaybackState = "stopped" | "playing" | "paused";
 type DragState =
@@ -31,11 +30,20 @@ interface StatusMessage {
 }
 
 interface UserAdminDraft {
+  loginIdentity: string;
+  email: string;
   displayName: string;
   role: Role;
   status: UserStatus;
   resetPassword: string;
   mustChangePassword: boolean;
+}
+
+interface RecoveryTokenInfo {
+  userId: string;
+  token: string;
+  expiresAt: string;
+  resetUrl: string | null;
 }
 
 const EMPTY_STATE: PersistedState = {
@@ -45,7 +53,9 @@ const EMPTY_STATE: PersistedState = {
   currentView: "editor",
   youtubeUrl: "",
   importLanguage: "en",
-  workspaceName: PRIMARY_WORKSPACE,
+  selectedWorkspaceId: "",
+  workspaceName: "",
+  workspaces: [],
   users: [],
   titles: [],
   storage: {
@@ -103,21 +113,42 @@ function parseYouTubeEntries(value: string) {
   ];
 }
 
-function createWavePoints(width: number, height: number) {
-  const points: string[] = [];
+const MIN_WAVE_VISIBLE_SECONDS = 1.5;
+const MAX_DEFAULT_WAVE_VISIBLE_SECONDS = 24;
 
-  for (let step = 0; step <= 120; step += 1) {
-    const x = (step / 120) * width;
-    const amplitude =
-      (Math.sin(step * 0.31) * 0.34 +
-        Math.sin(step * 0.13 + 1.5) * 0.22 +
-        Math.cos(step * 0.61 + 0.9) * 0.18) *
-      height;
-    const y = height / 2 + amplitude;
-    points.push(`${x},${y}`);
+function getWaveMinVisibleRange(duration: number) {
+  return duration > 0 ? Math.min(MIN_WAVE_VISIBLE_SECONDS, duration) : MIN_WAVE_VISIBLE_SECONDS;
+}
+
+function getWaveViewRange(duration: number, zoom: number) {
+  if (!duration || duration <= 0) {
+    return 10;
   }
 
-  return points.join(" ");
+  return clamp(duration / Math.max(zoom, 1), getWaveMinVisibleRange(duration), duration);
+}
+
+function getMaxWaveZoom(duration: number) {
+  if (!duration || duration <= 0) {
+    return 1;
+  }
+
+  return Math.max(1, duration / getWaveMinVisibleRange(duration));
+}
+
+function getDefaultWaveViewRange(duration: number, phrase: Phrase | null) {
+  if (!duration || duration <= 0) {
+    return 10;
+  }
+
+  const phraseDuration = phrase ? Math.max(phrase.end - phrase.start, 0.75) : 3;
+  const minRange = Math.min(duration, 8);
+  const maxRange = Math.min(duration, MAX_DEFAULT_WAVE_VISIBLE_SECONDS);
+  return clamp(phraseDuration * 6, minRange, maxRange);
+}
+
+function centerWavePan(duration: number, viewRange: number, focusTime: number) {
+  return clamp(focusTime - viewRange / 2, 0, Math.max(0, duration - viewRange));
 }
 
 export default function App() {
@@ -129,15 +160,20 @@ export default function App() {
   });
   const [loadingState, setLoadingState] = useState(true);
   const [authInFlight, setAuthInFlight] = useState(false);
-  const [loginEmail, setLoginEmail] = useState("");
+  const [loginIdentifier, setLoginIdentifier] = useState("");
   const [loginPassword, setLoginPassword] = useState("");
+  const [recoveryForm, setRecoveryForm] = useState({
+    token: "",
+    nextPassword: "",
+    confirmPassword: "",
+  });
   const [playbackState, setPlaybackState] = useState<PlaybackState>("stopped");
   const [loopPlayback, setLoopPlayback] = useState(false);
   const [playbackSpeed, setPlaybackSpeed] = useState(1);
   const [playheadTime, setPlayheadTime] = useState<number | null>(null);
   const [textDraft, setTextDraft] = useState("");
   const [textDraftDirty, setTextDraftDirty] = useState(false);
-  const [waveZoom, setWaveZoom] = useState(1.6);
+  const [waveZoom, setWaveZoom] = useState(1);
   const [wavePan, setWavePan] = useState(0);
   const [dragState, setDragState] = useState<DragState>(null);
   const [timingDraft, setTimingDraft] = useState({ start: "0.00", end: "0.00" });
@@ -158,6 +194,7 @@ export default function App() {
     confirmPassword: "",
   });
   const [createUserForm, setCreateUserForm] = useState({
+    loginIdentity: "",
     email: "",
     displayName: "",
     password: "",
@@ -165,8 +202,10 @@ export default function App() {
     status: "active" as UserStatus,
     mustChangePassword: true,
   });
+  const [workspaceNameDraft, setWorkspaceNameDraft] = useState("");
   const [userDrafts, setUserDrafts] = useState<Record<string, UserAdminDraft>>({});
   const [selectedManagedUserId, setSelectedManagedUserId] = useState("");
+  const [generatedRecovery, setGeneratedRecovery] = useState<RecoveryTokenInfo | null>(null);
   const [storageAccessKeyId, setStorageAccessKeyId] = useState("");
   const [storageSecretAccessKey, setStorageSecretAccessKey] = useState("");
 
@@ -178,8 +217,12 @@ export default function App() {
   const appStateRef = useRef<PersistedState>(EMPTY_STATE);
   const textDraftRef = useRef("");
   const textDraftDirtyRef = useRef(false);
+  const selectedPhraseRef = useRef<Phrase | null>(null);
+  const playbackCommandRef = useRef<"pause" | "stop" | "phrase-end" | null>(null);
 
   const currentUser = appState.users.find((user) => user.id === appState.sessionUserId) ?? null;
+  const selectedWorkspace =
+    appState.workspaces.find((workspace) => workspace.id === appState.selectedWorkspaceId) ?? appState.workspaces[0] ?? null;
   const selectedTitle =
     appState.titles.find((title) => title.id === appState.selectedTitleId) ?? appState.titles[0] ?? null;
   const selectedPhrase =
@@ -193,7 +236,7 @@ export default function App() {
   const editable = Boolean(currentUser && selectedTitle?.checkedOutByUserId === currentUser.id);
   const canEdit = editable && !saveInFlight && !passwordChangeRequired;
   const activeCheckedOutTitleId = appState.titles.find((title) => title.checkedOutByUserId === currentUser?.id)?.id ?? null;
-  const viewRange = selectedTitle ? selectedTitle.duration / waveZoom : 10;
+  const viewRange = selectedTitle ? getWaveViewRange(selectedTitle.duration, waveZoom) : 10;
   const visibleStart = clamp(wavePan, 0, Math.max(0, (selectedTitle?.duration ?? 0) - viewRange));
   const visibleEnd = visibleStart + viewRange;
 
@@ -218,6 +261,17 @@ export default function App() {
   }, []);
 
   useEffect(() => {
+    const params = new URLSearchParams(window.location.search);
+    const resetToken = params.get("resetToken");
+    if (!resetToken) {
+      return;
+    }
+
+    setRecoveryForm((current) => ({ ...current, token: resetToken }));
+    postStatus("info", "Recovery token loaded from the link. Set a new password to continue.");
+  }, []);
+
+  useEffect(() => {
     appStateRef.current = appState;
   }, [appState]);
 
@@ -230,18 +284,26 @@ export default function App() {
   }, [textDraftDirty]);
 
   useEffect(() => {
+    selectedPhraseRef.current = selectedPhrase;
+  }, [selectedPhrase]);
+
+  useEffect(() => {
     setUserDrafts((current) => {
       const nextDrafts: Record<string, UserAdminDraft> = {};
       appState.users.forEach((user) => {
         nextDrafts[user.id] = current[user.id]
           ? {
               ...current[user.id],
+              loginIdentity: current[user.id].loginIdentity || user.loginIdentity,
+              email: current[user.id].email || user.email,
               displayName: current[user.id].displayName || user.displayName,
               role: current[user.id].role,
               status: current[user.id].status,
               mustChangePassword: current[user.id].mustChangePassword,
             }
           : {
+              loginIdentity: user.loginIdentity,
+              email: user.email,
               displayName: user.displayName,
               role: user.role,
               status: user.status,
@@ -281,6 +343,32 @@ export default function App() {
       end: selectedPhrase.end.toFixed(2),
     });
   }, [selectedPhrase?.id, selectedPhrase?.text, selectedPhrase?.start, selectedPhrase?.end]);
+
+  useEffect(() => {
+    if (!selectedTitle) {
+      setWaveZoom(1);
+      setWavePan(0);
+      return;
+    }
+
+    const nextViewRange = getDefaultWaveViewRange(selectedTitle.duration, selectedPhrase);
+    const focusTime = selectedPhrase ? (selectedPhrase.start + selectedPhrase.end) / 2 : nextViewRange / 2;
+
+    setWaveZoom(clamp(selectedTitle.duration / nextViewRange, 1, getMaxWaveZoom(selectedTitle.duration)));
+    setWavePan(centerWavePan(selectedTitle.duration, nextViewRange, focusTime));
+  }, [selectedTitle?.id]);
+
+  useEffect(() => {
+    if (!selectedTitle || !selectedPhrase) {
+      return;
+    }
+
+    const padding = Math.min(viewRange * 0.18, 2);
+    if (selectedPhrase.start < visibleStart + padding || selectedPhrase.end > visibleEnd - padding) {
+      const focusTime = (selectedPhrase.start + selectedPhrase.end) / 2;
+      setWavePan(centerWavePan(selectedTitle.duration, viewRange, focusTime));
+    }
+  }, [selectedPhrase?.id, selectedTitle?.id, selectedTitle?.duration, viewRange]);
 
   useEffect(() => {
     const handleBeforeUnload = (event: BeforeUnloadEvent) => {
@@ -383,23 +471,29 @@ export default function App() {
     audioRef.current = audio;
 
     const handlePause = () => {
-      setPlaybackState((current) => (current === "stopped" ? current : "paused"));
+      const command = playbackCommandRef.current;
+      if (command) {
+        playbackCommandRef.current = null;
+        return;
+      }
+
+      setPlaybackState((current) => (current === "playing" ? "paused" : current));
     };
     const handleEnded = () => {
       setPlaybackState("stopped");
-      setPlayheadTime(selectedPhrase?.end ?? null);
+      setPlayheadTime(selectedPhraseRef.current?.end ?? audio.currentTime ?? null);
     };
 
     audio.addEventListener("pause", handlePause);
     audio.addEventListener("ended", handleEnded);
 
     return () => {
-      audio.pause();
+      pauseAudio(audio, "stop");
       audio.removeEventListener("pause", handlePause);
       audio.removeEventListener("ended", handleEnded);
       audioRef.current = null;
     };
-  }, [selectedPhrase?.end]);
+  }, []);
 
   useEffect(() => {
     const audio = audioRef.current;
@@ -416,44 +510,70 @@ export default function App() {
       return;
     }
 
+    pauseAudio(audio, "stop");
     if (selectedTitle?.audioUrl) {
+      const syncToSelectedPhraseStart = () => {
+        const nextStart = selectedPhraseRef.current?.start ?? 0;
+        try {
+          audio.currentTime = nextStart;
+        } catch {
+          // Ignore seeks before metadata becomes ready.
+        }
+        setPlayheadTime(nextStart);
+      };
+
+      const handleLoadedMetadata = () => {
+        syncToSelectedPhraseStart();
+      };
+
       audio.src = selectedTitle.audioUrl;
+      audio.addEventListener("loadedmetadata", handleLoadedMetadata, { once: true });
       audio.load();
-      setPlayheadTime(selectedPhrase?.start ?? 0);
+      syncToSelectedPhraseStart();
+      setPlaybackState("stopped");
+      return () => {
+        audio.removeEventListener("loadedmetadata", handleLoadedMetadata);
+      };
     } else {
-      audio.pause();
       audio.removeAttribute("src");
       setPlayheadTime(null);
     }
     setPlaybackState("stopped");
-  }, [selectedTitle?.id, selectedTitle?.audioUrl, selectedPhrase?.start]);
+  }, [selectedTitle?.id, selectedTitle?.audioUrl]);
 
   useEffect(() => {
     const audio = audioRef.current;
-    if (!audio || !selectedPhrase) {
+    if (!audio || playbackState !== "playing" || !selectedPhrase) {
       return;
     }
 
-    const handleTimeUpdate = () => {
+    let frameId = 0;
+
+    const tick = () => {
       const current = audio.currentTime;
-      setPlayheadTime(current);
       if (current >= selectedPhrase.end) {
         if (loopPlayback) {
           audio.currentTime = selectedPhrase.start;
-          void audio.play().catch(() => undefined);
+          setPlayheadTime(selectedPhrase.start);
         } else {
-          audio.pause();
+          pauseAudio(audio, "phrase-end");
+          audio.currentTime = selectedPhrase.end;
           setPlaybackState("stopped");
           setPlayheadTime(selectedPhrase.end);
+          return;
         }
+      } else {
+        setPlayheadTime(current);
       }
+
+      frameId = window.requestAnimationFrame(tick);
     };
 
-    audio.addEventListener("timeupdate", handleTimeUpdate);
+    frameId = window.requestAnimationFrame(tick);
     return () => {
-      audio.removeEventListener("timeupdate", handleTimeUpdate);
+      window.cancelAnimationFrame(frameId);
     };
-  }, [loopPlayback, selectedPhrase?.end, selectedPhrase?.start, selectedPhrase?.id]);
+  }, [loopPlayback, playbackState, selectedPhrase?.end, selectedPhrase?.start, selectedPhrase?.id]);
 
   useEffect(() => {
     if (!currentUser) {
@@ -537,6 +657,28 @@ export default function App() {
       setPlaybackState("stopped");
     }
   }, [playbackState, selectedTitle?.audioUrl]);
+
+  useEffect(() => {
+    const audio = audioRef.current;
+    if (!selectedPhrase) {
+      setPlayheadTime(null);
+      return;
+    }
+
+    if (playbackState === "playing" && audio) {
+      pauseAudio(audio, "stop");
+      setPlaybackState("stopped");
+    }
+
+    if (audio && selectedTitle?.audioUrl) {
+      try {
+        audio.currentTime = selectedPhrase.start;
+      } catch {
+        // Ignore seeks before metadata becomes ready.
+      }
+    }
+    setPlayheadTime(selectedPhrase.start);
+  }, [selectedPhrase?.id, selectedTitle?.id, selectedTitle?.audioUrl]);
 
   useEffect(() => {
     if (!dragState || !selectedTitle || !selectedPhrase || !waveformRef.current) {
@@ -647,6 +789,7 @@ export default function App() {
       confirmPassword: "",
     });
     setCreateUserForm({
+      loginIdentity: "",
       email: "",
       displayName: "",
       password: "",
@@ -654,8 +797,10 @@ export default function App() {
       status: "active",
       mustChangePassword: true,
     });
+    setWorkspaceNameDraft("");
     setUserDrafts({});
     setSelectedManagedUserId("");
+    setGeneratedRecovery(null);
     setMediaTitle("");
     setMediaSource("");
     setMediaLanguage("en");
@@ -665,6 +810,13 @@ export default function App() {
     setMediaProbeInFlight(false);
     setMediaSubtitleStreams([]);
     setSelectedSubtitleStreamIndex("");
+    setLoginIdentifier("");
+    setLoginPassword("");
+    setRecoveryForm({
+      token: "",
+      nextPassword: "",
+      confirmPassword: "",
+    });
     postStatus("info", message);
   }
 
@@ -912,14 +1064,14 @@ export default function App() {
   }
 
   async function login() {
-    if (!loginEmail.trim() || !loginPassword.trim()) {
-      postStatus("warning", "Enter an email and password to sign in.");
+    if (!loginIdentifier.trim() || !loginPassword.trim()) {
+      postStatus("warning", "Enter a login identity or email and a password to sign in.");
       return;
     }
 
     setAuthInFlight(true);
     try {
-      const response = await api.login(loginEmail.trim(), loginPassword);
+      const response = await api.login(loginIdentifier.trim(), loginPassword);
       applyServerResponse(response);
       setLoginPassword("");
       const signedInUser = response.state.users.find((user) => user.id === response.state.sessionUserId) ?? null;
@@ -931,6 +1083,36 @@ export default function App() {
       );
     } catch (error) {
       postStatus("error", error instanceof Error ? error.message : "Sign in failed.");
+    } finally {
+      setAuthInFlight(false);
+    }
+  }
+
+  async function redeemRecovery() {
+    if (!recoveryForm.token.trim() || !recoveryForm.nextPassword) {
+      postStatus("warning", "Enter the recovery token and a new password first.");
+      return;
+    }
+    if (recoveryForm.nextPassword !== recoveryForm.confirmPassword) {
+      postStatus("error", "Recovery password confirmation does not match.");
+      return;
+    }
+
+    setAuthInFlight(true);
+    try {
+      const response = await api.redeemRecoveryToken(recoveryForm.token.trim(), recoveryForm.nextPassword);
+      applyServerResponse(response);
+      setRecoveryForm({
+        token: "",
+        nextPassword: "",
+        confirmPassword: "",
+      });
+      postStatus("success", "Password reset complete. You are now signed in.");
+      if (window.location.search.includes("resetToken=")) {
+        window.history.replaceState({}, document.title, window.location.pathname);
+      }
+    } catch (error) {
+      postStatus("error", error instanceof Error ? error.message : "Could not redeem the recovery token.");
     } finally {
       setAuthInFlight(false);
     }
@@ -958,23 +1140,72 @@ export default function App() {
     }
 
     if (action === "playing") {
-      if (audio.currentTime < selectedPhrase.start || audio.currentTime > selectedPhrase.end) {
+      try {
         audio.currentTime = selectedPhrase.start;
+      } catch {
+        // Ignore seeks before metadata becomes ready.
       }
       audio.playbackRate = playbackSpeed;
-      void audio.play().catch(() => undefined);
-      setPlayheadTime(audio.currentTime || selectedPhrase.start);
+      playbackCommandRef.current = null;
+      setPlayheadTime(selectedPhrase.start);
+      void audio
+        .play()
+        .then(() => {
+          setPlaybackState("playing");
+        })
+        .catch(() => {
+          setPlaybackState("stopped");
+          postStatus("error", "Browser playback could not start for this phrase.");
+        });
       postStatus("info", `Playback ${playbackSpeed.toFixed(2)}x on the selected phrase.`);
+      return;
     }
     if (action === "paused") {
-      audio.pause();
+      pauseAudio(audio, "pause");
+      setPlaybackState("paused");
+      return;
     }
     if (action === "stopped") {
-      audio.pause();
-      audio.currentTime = selectedPhrase.start;
+      pauseAudio(audio, "stop");
+      try {
+        audio.currentTime = selectedPhrase.start;
+      } catch {
+        // Ignore seeks before metadata becomes ready.
+      }
       setPlayheadTime(selectedPhrase.start);
+      setPlaybackState("stopped");
+      return;
     }
-    setPlaybackState(action);
+  }
+
+  function pauseAudio(audio: HTMLAudioElement, command: "pause" | "stop" | "phrase-end") {
+    const wasPlaying = !audio.paused;
+    playbackCommandRef.current = command;
+    audio.pause();
+    if (!wasPlaying) {
+      playbackCommandRef.current = null;
+    }
+  }
+
+  function zoomWave(direction: "in" | "out", focusTime?: number) {
+    if (!selectedTitle) {
+      return;
+    }
+
+    const nextZoom = clamp(
+      waveZoom * (direction === "in" ? 1.35 : 1 / 1.35),
+      1,
+      getMaxWaveZoom(selectedTitle.duration),
+    );
+    const focus =
+      focusTime ?? (selectedPhrase ? (selectedPhrase.start + selectedPhrase.end) / 2 : visibleStart + viewRange / 2);
+    const anchorRatio = viewRange > 0 ? clamp((focus - visibleStart) / viewRange, 0, 1) : 0.5;
+    const nextViewRange = getWaveViewRange(selectedTitle.duration, nextZoom);
+
+    setWaveZoom(nextZoom);
+    setWavePan(
+      clamp(focus - anchorRatio * nextViewRange, 0, Math.max(0, selectedTitle.duration - nextViewRange)),
+    );
   }
 
   function startPan(pointerId: number, clientX: number) {
@@ -996,6 +1227,8 @@ export default function App() {
       ...current,
       [userId]: updater(
         current[userId] || {
+          loginIdentity: appState.users.find((user) => user.id === userId)?.loginIdentity || "",
+          email: appState.users.find((user) => user.id === userId)?.email || "",
           displayName: appState.users.find((user) => user.id === userId)?.displayName || "",
           role: appState.users.find((user) => user.id === userId)?.role || "user",
           status: appState.users.find((user) => user.id === userId)?.status || "active",
@@ -1037,13 +1270,14 @@ export default function App() {
     if (!currentUser || currentUser.role !== "admin") {
       return;
     }
-    if (!createUserForm.email.trim() || !createUserForm.displayName.trim() || !createUserForm.password) {
-      postStatus("warning", "Email, display name, and password are required to create a user.");
+    if (!createUserForm.loginIdentity.trim() || !createUserForm.email.trim() || !createUserForm.displayName.trim() || !createUserForm.password) {
+      postStatus("warning", "Login identity, email, display name, and password are required to create a user.");
       return;
     }
 
     try {
       const response = await api.createUser({
+        loginIdentity: createUserForm.loginIdentity.trim(),
         email: createUserForm.email.trim(),
         displayName: createUserForm.displayName.trim(),
         password: createUserForm.password,
@@ -1053,6 +1287,7 @@ export default function App() {
       });
       applyServerResponse(response, { preserveView: true });
       setCreateUserForm({
+        loginIdentity: "",
         email: "",
         displayName: "",
         password: "",
@@ -1078,6 +1313,8 @@ export default function App() {
 
     try {
       const response = await api.updateUser(userId, {
+        loginIdentity: draft.loginIdentity.trim(),
+        email: draft.email.trim(),
         displayName: draft.displayName.trim(),
         role: draft.role,
         status: draft.status,
@@ -1113,6 +1350,53 @@ export default function App() {
       postStatus("success", "User password reset on the server.");
     } catch (error) {
       postStatus("error", error instanceof Error ? error.message : "Could not reset the user password.");
+    }
+  }
+
+  async function issueManagedUserRecovery(userId: string) {
+    if (!currentUser || currentUser.role !== "admin") {
+      return;
+    }
+
+    try {
+      const response = await api.issueRecoveryToken(userId);
+      setGeneratedRecovery(response.recovery);
+      postStatus("success", "Recovery token generated. Share it securely with the user.");
+    } catch (error) {
+      postStatus("error", error instanceof Error ? error.message : "Could not generate a recovery token.");
+    }
+  }
+
+  async function selectWorkspace(workspaceId: string) {
+    if (!currentUser || workspaceId === appState.selectedWorkspaceId) {
+      return;
+    }
+
+    try {
+      const response = await api.selectWorkspace(workspaceId);
+      applyServerResponse(response, { preserveView: true });
+      postStatus("info", `Workspace switched to ${response.state.workspaceName}.`);
+    } catch (error) {
+      postStatus("error", error instanceof Error ? error.message : "Could not switch workspace.");
+    }
+  }
+
+  async function submitCreateWorkspace() {
+    if (!currentUser || currentUser.role !== "admin") {
+      return;
+    }
+    if (!workspaceNameDraft.trim()) {
+      postStatus("warning", "Enter a workspace name first.");
+      return;
+    }
+
+    try {
+      const response = await api.createWorkspace(workspaceNameDraft.trim());
+      applyServerResponse(response, { preserveView: true });
+      setWorkspaceNameDraft("");
+      postStatus("success", `Workspace ${response.state.workspaceName} created.`);
+    } catch (error) {
+      postStatus("error", error instanceof Error ? error.message : "Could not create the workspace.");
     }
   }
 
@@ -1586,13 +1870,19 @@ export default function App() {
   const headerSuffix = selectedTitle ? getTitleHeaderSuffix(selectedTitle) : "";
   const waveformWidth = 760;
   const waveformHeight = 160;
-  const wavePoints = createWavePoints(waveformWidth, waveformHeight);
   const regionStart =
     selectedPhrase && selectedTitle ? ((selectedPhrase.start - visibleStart) / viewRange) * waveformWidth : 0;
   const regionEnd =
     selectedPhrase && selectedTitle ? ((selectedPhrase.end - visibleStart) / viewRange) * waveformWidth : 0;
   const playheadX =
-    playheadTime !== null && selectedTitle ? ((playheadTime - visibleStart) / viewRange) * waveformWidth : null;
+    playheadTime !== null && selectedTitle && playheadTime >= visibleStart && playheadTime <= visibleEnd
+      ? ((playheadTime - visibleStart) / viewRange) * waveformWidth
+      : null;
+  const waveformImageScale = selectedTitle ? Math.max(1, selectedTitle.duration / viewRange) : 1;
+  const waveformImageWidth = waveformWidth * waveformImageScale;
+  const waveformImageX =
+    selectedTitle && selectedTitle.duration > 0 ? -((visibleStart / selectedTitle.duration) * waveformImageWidth) : 0;
+  const waveformClipId = "editor-waveform-clip";
 
   if (loadingState) {
     return (
@@ -1619,8 +1909,8 @@ export default function App() {
 
           <div className="login-actions">
             <label className="field">
-              <span>Email or login</span>
-              <input value={loginEmail} onChange={(event) => setLoginEmail(event.target.value)} />
+              <span>Login identity or email</span>
+              <input value={loginIdentifier} onChange={(event) => setLoginIdentifier(event.target.value)} />
             </label>
             <label className="field">
               <span>Password</span>
@@ -1643,6 +1933,45 @@ export default function App() {
             First-use bootstrap login: <code>admin</code> / <code>password</code>. That account is forced to change its
             password on first sign-in.
           </p>
+          <section className="card form-card login-recovery-card">
+            <div className="card-header">
+              <div>
+                <span className="eyebrow">Account Recovery</span>
+                <h3>Redeem Recovery Token</h3>
+              </div>
+            </div>
+            <div className="settings-form">
+              <label className="field">
+                <span>Recovery token</span>
+                <input
+                  value={recoveryForm.token}
+                  onChange={(event) => setRecoveryForm((current) => ({ ...current, token: event.target.value }))}
+                />
+              </label>
+              <label className="field">
+                <span>New password</span>
+                <input
+                  type="password"
+                  value={recoveryForm.nextPassword}
+                  onChange={(event) => setRecoveryForm((current) => ({ ...current, nextPassword: event.target.value }))}
+                />
+              </label>
+              <label className="field">
+                <span>Confirm new password</span>
+                <input
+                  type="password"
+                  value={recoveryForm.confirmPassword}
+                  onChange={(event) => setRecoveryForm((current) => ({ ...current, confirmPassword: event.target.value }))}
+                />
+              </label>
+            </div>
+            <div className="button-row">
+              <button className="toolbar-button primary" onClick={() => void redeemRecovery()} type="button" disabled={authInFlight}>
+                Reset With Token
+              </button>
+            </div>
+            <p className="helper-text">An admin can generate a one-time recovery token from User Maintenance if you lose your password.</p>
+          </section>
         </section>
 
         <section className="spec-panel">
@@ -1676,14 +2005,22 @@ export default function App() {
       <header className="topbar">
         <div className="brand-block">
           <div className="eyebrow">yt-asr Browser Workspace</div>
-          <strong>{appState.workspaceName}</strong>
+          <strong>{selectedWorkspace?.name || appState.workspaceName || "Workspace"}</strong>
         </div>
 
         <div className="toolbar-grid">
           <label className="field compact">
             <span>Workspace</span>
-            <select value={appState.workspaceName} disabled>
-              <option value={appState.workspaceName}>{appState.workspaceName}</option>
+            <select
+              value={appState.selectedWorkspaceId}
+              onChange={(event) => void selectWorkspace(event.target.value)}
+              disabled={passwordChangeRequired || appState.workspaces.length === 0}
+            >
+              {appState.workspaces.map((workspace) => (
+                <option key={workspace.id} value={workspace.id}>
+                  {workspace.name}
+                </option>
+              ))}
             </select>
           </label>
           <button className="toolbar-button" onClick={reloadLibrary} type="button">
@@ -1860,10 +2197,10 @@ export default function App() {
                     <h3>Phrase Timing Editor</h3>
                   </div>
                   <div className="button-row">
-                    <button className="toolbar-button" onClick={() => setWaveZoom((current) => clamp(current - 0.3, 1, 6))} type="button">
+                    <button className="toolbar-button" onClick={() => zoomWave("out")} type="button">
                       Zoom Out
                     </button>
-                    <button className="toolbar-button" onClick={() => setWaveZoom((current) => clamp(current + 0.3, 1, 6))} type="button">
+                    <button className="toolbar-button" onClick={() => zoomWave("in")} type="button">
                       Zoom In
                     </button>
                   </div>
@@ -1876,7 +2213,9 @@ export default function App() {
                   onPointerDown={(event) => startPan(event.pointerId, event.clientX)}
                   onWheel={(event) => {
                     event.preventDefault();
-                    setWaveZoom((current) => clamp(current + (event.deltaY > 0 ? -0.18 : 0.18), 1, 6));
+                    const bounds = waveformRef.current?.getBoundingClientRect();
+                    const ratio = bounds ? clamp((event.clientX - bounds.left) / bounds.width, 0, 1) : 0.5;
+                    zoomWave(event.deltaY > 0 ? "out" : "in", visibleStart + ratio * viewRange);
                   }}
                   role="img"
                   aria-label="Waveform editor"
@@ -1886,20 +2225,31 @@ export default function App() {
                       <stop offset="0%" stopColor="#8ad6ff" />
                       <stop offset="100%" stopColor="#ffb86f" />
                     </linearGradient>
+                    <clipPath id={waveformClipId}>
+                      <rect x="0" y="0" width={waveformWidth} height={waveformHeight} rx="18" ry="18" />
+                    </clipPath>
                   </defs>
+                  <rect x="0" y="0" width={waveformWidth} height={waveformHeight} rx="18" className="waveform-base" />
                   {selectedTitle.waveformUrl ? (
-                    <image
-                      href={selectedTitle.waveformUrl}
-                      x="0"
-                      y="0"
-                      width={waveformWidth}
-                      height={waveformHeight}
-                      preserveAspectRatio="none"
-                      opacity="0.42"
-                    />
-                  ) : null}
-                  <rect x="0" y="0" width={waveformWidth} height={waveformHeight} rx="18" />
-                  <polyline points={wavePoints} fill="none" stroke="url(#wave-gradient)" strokeWidth="2.5" />
+                    <g clipPath={`url(#${waveformClipId})`}>
+                      <image
+                        href={selectedTitle.waveformUrl}
+                        x={waveformImageX}
+                        y="0"
+                        width={waveformImageWidth}
+                        height={waveformHeight}
+                        preserveAspectRatio="none"
+                        className="waveform-image"
+                      />
+                    </g>
+                  ) : (
+                    <>
+                      <line x1="0" x2={waveformWidth} y1={waveformHeight / 2} y2={waveformHeight / 2} className="waveform-empty-line" />
+                      <text x={waveformWidth / 2} y={waveformHeight / 2 + 6} textAnchor="middle" className="waveform-empty-label">
+                        No waveform artifact is available for this title yet.
+                      </text>
+                    </>
+                  )}
                   {selectedPhrase ? (
                     <>
                       <rect
@@ -1941,7 +2291,7 @@ export default function App() {
 
                 <div className="waveform-footer">
                   <span>Visible range: {formatTime(visibleStart)} to {formatTime(visibleEnd)}</span>
-                  <span>Mouse wheel zoom, drag the background to pan, drag markers to retime.</span>
+                  <span>Mouse wheel zoom, drag the background to pan, drag markers to retime, play always runs the selected phrase bounds.</span>
                 </div>
               </section>
 
@@ -2465,6 +2815,10 @@ export default function App() {
               </div>
               <div className="settings-form">
                 <label className="field">
+                  <span>Login identity</span>
+                  <input value={currentUser.loginIdentity} readOnly />
+                </label>
+                <label className="field">
                   <span>Display name</span>
                   <input value={currentUser.displayName} readOnly />
                 </label>
@@ -2526,6 +2880,53 @@ export default function App() {
             </section>
 
             {currentUser.role === "admin" ? (
+              <section className="card form-card span-two">
+                <div className="card-header">
+                  <div>
+                    <span className="eyebrow">Workspaces</span>
+                    <h3>Project Scope</h3>
+                  </div>
+                  <button className="toolbar-button primary" onClick={() => void submitCreateWorkspace()} type="button">
+                    Create Workspace
+                  </button>
+                </div>
+                <div className="settings-form">
+                  <label className="field">
+                    <span>New workspace name</span>
+                    <input
+                      value={workspaceNameDraft}
+                      onChange={(event) => setWorkspaceNameDraft(event.target.value)}
+                      placeholder="Client Review Queue"
+                    />
+                  </label>
+                  <label className="field">
+                    <span>Current workspace</span>
+                    <input value={selectedWorkspace?.name || appState.workspaceName} readOnly />
+                  </label>
+                </div>
+                <div className="title-list cloud-list-grid">
+                  {appState.workspaces.map((workspace) => (
+                    <button
+                      key={workspace.id}
+                      className={`title-card ${appState.selectedWorkspaceId === workspace.id ? "active" : ""}`}
+                      onClick={() => void selectWorkspace(workspace.id)}
+                      type="button"
+                    >
+                      <div className="title-card-top">
+                        <strong>{workspace.name}</strong>
+                        <span className="pill">{workspace.slug}</span>
+                      </div>
+                      <div className="title-meta">
+                        <span>Created {formatTimestamp(workspace.createdAt)}</span>
+                        <span>{appState.selectedWorkspaceId === workspace.id ? "Active workspace" : "Switch workspace"}</span>
+                      </div>
+                    </button>
+                  ))}
+                </div>
+              </section>
+            ) : null}
+
+            {currentUser.role === "admin" ? (
               <section className="card form-card">
                 <div className="card-header">
                   <div>
@@ -2538,6 +2939,14 @@ export default function App() {
                 </div>
 
                 <div className="settings-form">
+                  <label className="field">
+                    <span>Login identity</span>
+                    <input
+                      value={createUserForm.loginIdentity}
+                      onChange={(event) => setCreateUserForm((current) => ({ ...current, loginIdentity: event.target.value }))}
+                      placeholder="admin, maya, jordan"
+                    />
+                  </label>
                   <label className="field">
                     <span>Email</span>
                     <input
@@ -2614,8 +3023,9 @@ export default function App() {
                           <strong>{user.displayName}</strong>
                           <span className="pill">{user.role}</span>
                         </div>
-                        <span>{user.email}</span>
+                        <span>{user.loginIdentity}</span>
                         <div className="title-meta">
+                          <span>{user.email}</span>
                           <span>{user.status}</span>
                           <span>{user.mustChangePassword ? "Password reset pending" : "Password active"}</span>
                         </div>
@@ -2627,9 +3037,33 @@ export default function App() {
                     <article className="audit-item user-editor-panel">
                       <div className="audit-top">
                         <strong>{selectedManagedUser.displayName}</strong>
-                        <span>{selectedManagedUser.email}</span>
+                        <span>{selectedManagedUser.loginIdentity}</span>
                       </div>
                       <div className="settings-form">
+                        <label className="field">
+                          <span>Login identity</span>
+                          <input
+                            value={selectedManagedUserDraft.loginIdentity}
+                            onChange={(event) =>
+                              updateUserDraft(selectedManagedUser.id, (current) => ({
+                                ...current,
+                                loginIdentity: event.target.value,
+                              }))
+                            }
+                          />
+                        </label>
+                        <label className="field">
+                          <span>Email</span>
+                          <input
+                            value={selectedManagedUserDraft.email}
+                            onChange={(event) =>
+                              updateUserDraft(selectedManagedUser.id, (current) => ({
+                                ...current,
+                                email: event.target.value,
+                              }))
+                            }
+                          />
+                        </label>
                         <label className="field">
                           <span>Display name</span>
                           <input
@@ -2711,7 +3145,16 @@ export default function App() {
                         >
                           Reset Password
                         </button>
+                        <button className="toolbar-button" onClick={() => void issueManagedUserRecovery(selectedManagedUser.id)} type="button">
+                          Issue Recovery Token
+                        </button>
                       </div>
+                      {generatedRecovery?.userId === selectedManagedUser.id ? (
+                        <div className="settings-note">
+                          Recovery token expires {formatTimestamp(generatedRecovery.expiresAt)}.
+                          {generatedRecovery.resetUrl ? ` Link: ${generatedRecovery.resetUrl}` : ` Token: ${generatedRecovery.token}`}
+                        </div>
+                      ) : null}
                       <div className="settings-note">
                         Last sign-in {formatTimestamp(selectedManagedUser.lastLoginAt)} / created{" "}
                         {formatTimestamp(selectedManagedUser.createdAt)} / updated{" "}

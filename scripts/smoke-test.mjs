@@ -10,7 +10,7 @@ const rootDir = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..")
 const startServer = process.argv.includes("--start-server");
 const smokePort = process.env.SMOKE_PORT || (startServer ? "3013" : "3001");
 const baseUrl = process.env.SMOKE_BASE_URL || `http://127.0.0.1:${smokePort}`;
-const email = process.env.SMOKE_EMAIL || "theo@yt-asr.local";
+const identifier = process.env.SMOKE_IDENTIFIER || process.env.SMOKE_EMAIL || "theo";
 const password = process.env.SMOKE_PASSWORD || "admin1234";
 
 const tempAudio = path.join(os.tmpdir(), "yt-asr-smoke.wav");
@@ -57,7 +57,7 @@ async function main() {
       headers: {
         "Content-Type": "application/json",
       },
-      body: JSON.stringify({ email, password }),
+      body: JSON.stringify({ identifier, password }),
     });
     if (!loginResponse.ok) {
       throw new Error(`Login failed: ${loginResponse.status} ${await loginResponse.text()}`);

@@ -1,4 +1,13 @@
-import type { AppStateResponse, JobRecord, Role, SaveKind, StorageConfig, SubtitleStreamRecord, TitleRecord, UserStatus } from "./types";
+import type {
+  AppStateResponse,
+  JobRecord,
+  Role,
+  SaveKind,
+  StorageConfig,
+  SubtitleStreamRecord,
+  TitleRecord,
+  UserStatus,
+} from "./types";
 
 async function readJson<T>(response: Response): Promise<T> {
   const payload = (await response.json().catch(() => ({}))) as T & { error?: string };
@@ -24,10 +33,10 @@ export const api = {
   getSession() {
     return requestJson<AppStateResponse>("/api/auth/session");
   },
-  login(email: string, password: string) {
+  login(identifier: string, password: string) {
     return requestJson<AppStateResponse>("/api/auth/login", {
       method: "POST",
-      body: JSON.stringify({ email, password }),
+      body: JSON.stringify({ identifier, password }),
     });
   },
   logout() {
@@ -39,11 +48,29 @@ export const api = {
       body: JSON.stringify({ currentPassword, nextPassword }),
     });
   },
+  redeemRecoveryToken(token: string, nextPassword: string) {
+    return requestJson<AppStateResponse>("/api/auth/redeem-reset-token", {
+      method: "POST",
+      body: JSON.stringify({ token, nextPassword }),
+    });
+  },
   getState() {
     return requestJson<AppStateResponse>("/api/state");
   },
   getJobs() {
     return requestJson<{ jobs: JobRecord[] }>("/api/jobs");
+  },
+  selectWorkspace(workspaceId: string) {
+    return requestJson<AppStateResponse>("/api/workspaces/select", {
+      method: "POST",
+      body: JSON.stringify({ workspaceId }),
+    });
+  },
+  createWorkspace(name: string) {
+    return requestJson<AppStateResponse>("/api/admin/workspaces", {
+      method: "POST",
+      body: JSON.stringify({ name }),
+    });
   },
   saveTitle(titleId: string, kind: SaveKind, title: TitleRecord) {
     return requestJson<AppStateResponse>(`/api/titles/${titleId}/save`, {
@@ -64,6 +91,7 @@ export const api = {
     return requestJson<AppStateResponse>(`/api/titles/${titleId}`, { method: "DELETE" });
   },
   createUser(input: {
+    loginIdentity: string;
     email: string;
     displayName: string;
     role: Role;
@@ -79,6 +107,8 @@ export const api = {
   updateUser(
     userId: string,
     input: {
+      loginIdentity?: string;
+      email?: string;
       displayName?: string;
       role?: Role;
       status?: UserStatus;
@@ -94,6 +124,14 @@ export const api = {
       method: "POST",
       body: JSON.stringify({ nextPassword, mustChangePassword }),
     });
+  },
+  issueRecoveryToken(userId: string) {
+    return requestJson<{ recovery: { token: string; expiresAt: string; resetUrl: string | null; userId: string } }>(
+      `/api/admin/users/${userId}/recovery-token`,
+      {
+        method: "POST",
+      },
+    );
   },
   queueYouTubeImport(urls: string[], language: string) {
     return requestJson<{ jobs: JobRecord[]; job: JobRecord | null }>("/api/import/youtube", {

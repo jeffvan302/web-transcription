@@ -51,12 +51,13 @@ Frontend runs on `http://localhost:4173` and proxies API requests to the backend
 In non-production mode, the database seeds these development users on first startup:
 
 - `admin` / `password`  (admin, forced to change password on first sign-in)
-- `maya@yt-asr.local` / `maya1234`
-- `jordan@yt-asr.local` / `jordan1234`
-- `theo@yt-asr.local` / `admin1234`
+- `maya` / `maya1234`
+- `jordan` / `jordan1234`
+- `theo` / `admin1234`
 
 In production, a bootstrap admin account is created by default as `admin` / `password`, and it is flagged to change the password on first sign-in. You can override that bootstrap account through environment variables such as:
 
+- `BOOTSTRAP_ADMIN_LOGIN_IDENTITY`
 - `BOOTSTRAP_ADMIN_EMAIL`
 - `BOOTSTRAP_ADMIN_PASSWORD`
 - `BOOTSTRAP_ADMIN_DISPLAY_NAME`
@@ -64,7 +65,10 @@ In production, a bootstrap admin account is created by default as `admin` / `pas
 ## What Works
 
 - real email/password login with server sessions
+- distinct login identity plus contact email per user
 - user administration, admin password reset, and self-service password change
+- admin-issued recovery tokens that users can redeem from the sign-in screen
+- multi-workspace/project support with a real workspace selector
 - server-enforced checkout and check-in rules
 - server-persisted working drafts with immediate save on important edit commits
 - local media upload

@@ -10,13 +10,15 @@ import {
   changeUserPassword,
   closeCheckoutRecords,
   createJob,
+  createPasswordRecoveryToken,
   createCheckoutRecord,
   createOrReplaceDraft,
   createSession,
   createUserAccount,
+  createWorkspace,
   deleteSession,
   deleteTitleRecord,
-  findUserByEmail,
+  findUserByIdentifier,
   getActiveCheckoutForUser,
   getDraftForTitle,
   getSessionWithUser,
@@ -26,10 +28,12 @@ import {
   insertAuditRecord,
   listJobs,
   markStorageConnectionTest,
+  redeemPasswordRecoveryToken,
   recoverInterruptedJobs,
   resetUserPassword,
   sanitizeUser,
   saveStorageSettings,
+  setUserCurrentWorkspace,
   updateUserAccount,
   updateTitleRecord,
   updateUserLastLogin,
@@ -70,6 +74,10 @@ function normalizeDisplayName(value, fallback = "User") {
 }
 
 function normalizeEmail(value) {
+  return String(value || "").trim().toLowerCase();
+}
+
+function normalizeLoginIdentity(value) {
   return String(value || "").trim().toLowerCase();
 }
 
@@ -177,10 +185,25 @@ function requireAdmin(req, res, next) {
   next();
 }
 
-function sendAppState(res, userId) {
+function syncWorkspaceToActiveCheckout(userId) {
+  const activeCheckout = getActiveCheckoutForUser(userId);
+  if (!activeCheckout?.workspace_id) {
+    return null;
+  }
+
+  try {
+    setUserCurrentWorkspace(userId, activeCheckout.workspace_id);
+    return activeCheckout.workspace_id;
+  } catch {
+    return null;
+  }
+}
+
+function sendAppState(res, userId, preferredWorkspaceId = null) {
+  const state = buildAppState(userId, preferredWorkspaceId);
   res.json({
-    state: buildAppState(userId),
-    jobs: listJobs(userId, 25),
+    state,
+    jobs: listJobs(userId, 25, state.selectedWorkspaceId || null),
   });
 }
 
@@ -291,21 +314,21 @@ app.get("/api/auth/session", (req, res) => {
   }
 
   reqUserDisplayNameCache.set(req.user.id, req.user.displayName);
-  sendAppState(res, req.user.id);
+  sendAppState(res, req.user.id, syncWorkspaceToActiveCheckout(req.user.id));
 });
 
 app.post("/api/auth/login", (req, res) => {
-  const email = String(req.body?.email || "").trim();
+  const identifier = String(req.body?.identifier || req.body?.email || "").trim();
   const password = String(req.body?.password || "");
 
-  if (!email || !password) {
-    res.status(400).json({ error: "Email and password are required." });
+  if (!identifier || !password) {
+    res.status(400).json({ error: "Login identity or email and password are required." });
     return;
   }
 
-  const userRow = findUserByEmail(email);
+  const userRow = findUserByIdentifier(identifier);
   if (!userRow || userRow.status !== "active" || !bcrypt.compareSync(password, userRow.password_hash)) {
-    res.status(401).json({ error: "Invalid email or password." });
+    res.status(401).json({ error: "Invalid login or password." });
     return;
   }
 
@@ -328,7 +351,7 @@ app.post("/api/auth/login", (req, res) => {
     createCookieOptions(appConfig.sessionTtlMs, appConfig.environment === "production"),
   );
 
-  sendAppState(res, user.id);
+  sendAppState(res, user.id, syncWorkspaceToActiveCheckout(user.id));
 });
 
 app.post("/api/auth/logout", requireUser, (req, res) => {
@@ -361,13 +384,87 @@ app.post("/api/auth/change-password", requireUser, (req, res) => {
   }
 });
 
+app.post("/api/auth/redeem-reset-token", (req, res) => {
+  const token = String(req.body?.token || "").trim();
+  const nextPassword = String(req.body?.nextPassword || "");
+
+  try {
+    if (!token) {
+      res.status(400).json({ error: "Recovery token is required." });
+      return;
+    }
+
+    validatePasswordStrength(nextPassword);
+    const user = redeemPasswordRecoveryToken(token, nextPassword);
+    const session = createSession(user.id);
+    updateUserLastLogin(user.id);
+
+    insertAuditRecord({
+      eventType: "password_recovery_redeem",
+      titleName: "Workspace",
+      actorUserId: user.id,
+      actorDisplayName: user.displayName,
+      details: "Recovered account access with an admin-issued recovery token.",
+    });
+
+    res.cookie(
+      appConfig.sessionCookieName,
+      session.id,
+      createCookieOptions(appConfig.sessionTtlMs, appConfig.environment === "production"),
+    );
+    sendAppState(res, user.id, syncWorkspaceToActiveCheckout(user.id));
+  } catch (error) {
+    res.status(400).json({ error: error instanceof Error ? error.message : "Could not redeem recovery token." });
+  }
+});
+
 app.get("/api/state", requireUser, (req, res) => {
   reqUserDisplayNameCache.set(req.user.id, req.user.displayName);
   sendAppState(res, req.user.id);
 });
 
 app.get("/api/jobs", requireUser, (req, res) => {
-  res.json({ jobs: listJobs(req.user.id, 30) });
+  const state = buildAppState(req.user.id);
+  res.json({ jobs: listJobs(req.user.id, 30, state.selectedWorkspaceId || null) });
+});
+
+app.post("/api/workspaces/select", requireUser, (req, res) => {
+  try {
+    const workspaceId = String(req.body?.workspaceId || "").trim();
+    if (!workspaceId) {
+      res.status(400).json({ error: "Workspace selection is required." });
+      return;
+    }
+
+    setUserCurrentWorkspace(req.user.id, workspaceId);
+    sendAppState(res, req.user.id, workspaceId);
+  } catch (error) {
+    const statusCode = error instanceof Error && error.message === "Workspace not found." ? 404 : 400;
+    res.status(statusCode).json({ error: error instanceof Error ? error.message : "Could not select workspace." });
+  }
+});
+
+app.post("/api/admin/workspaces", requireAdmin, (req, res) => {
+  try {
+    const workspace = createWorkspace({
+      name: String(req.body?.name || ""),
+      createdByUserId: req.user.id,
+    });
+    setUserCurrentWorkspace(req.user.id, workspace.id);
+
+    insertAuditRecord({
+      eventType: "workspace_create",
+      workspaceId: workspace.id,
+      titleName: workspace.name,
+      actorUserId: req.user.id,
+      actorDisplayName: req.user.displayName,
+      details: `Created workspace ${workspace.name}.`,
+    });
+
+    sendAppState(res, req.user.id, workspace.id);
+  } catch (error) {
+    res.status(400).json({ error: error instanceof Error ? error.message : "Could not create workspace." });
+  }
 });
 
 app.post("/api/admin/users", requireAdmin, (req, res) => {
@@ -375,6 +472,7 @@ app.post("/api/admin/users", requireAdmin, (req, res) => {
     const password = String(req.body?.password || "");
     validatePasswordStrength(password);
     const createdUser = createUserAccount({
+      loginIdentity: normalizeLoginIdentity(req.body?.loginIdentity),
       email: normalizeEmail(req.body?.email),
       displayName: normalizeDisplayName(req.body?.displayName),
       role: req.body?.role === "admin" ? "admin" : "user",
@@ -388,7 +486,7 @@ app.post("/api/admin/users", requireAdmin, (req, res) => {
       titleName: "Workspace",
       actorUserId: req.user.id,
       actorDisplayName: req.user.displayName,
-      details: `Created user ${createdUser.displayName} (${createdUser.email}).`,
+      details: `Created user ${createdUser.displayName} (${createdUser.loginIdentity}).`,
     });
 
     sendAppState(res, req.user.id);
@@ -411,6 +509,8 @@ app.patch("/api/admin/users/:userId", requireAdmin, (req, res) => {
     }
 
     const updated = updateUserAccount(req.params.userId, {
+      loginIdentity: req.body?.loginIdentity,
+      email: req.body?.email,
       displayName: req.body?.displayName,
       role: req.body?.role,
       status: req.body?.status,
@@ -421,7 +521,7 @@ app.patch("/api/admin/users/:userId", requireAdmin, (req, res) => {
       titleName: "Workspace",
       actorUserId: req.user.id,
       actorDisplayName: req.user.displayName,
-      details: `Updated user ${updated.displayName}: role ${updated.role}, status ${updated.status}.`,
+      details: `Updated user ${updated.displayName}: login ${updated.loginIdentity}, role ${updated.role}, status ${updated.status}.`,
     });
 
     sendAppState(res, req.user.id);
@@ -448,6 +548,35 @@ app.post("/api/admin/users/:userId/reset-password", requireAdmin, (req, res) => 
   } catch (error) {
     const statusCode = error instanceof Error && error.message === "User not found." ? 404 : 400;
     res.status(statusCode).json({ error: error instanceof Error ? error.message : "Could not reset password." });
+  }
+});
+
+app.post("/api/admin/users/:userId/recovery-token", requireAdmin, (req, res) => {
+  try {
+    const issued = createPasswordRecoveryToken(req.params.userId, req.user.id);
+    const resetUrl = appConfig.baseUrl
+      ? `${appConfig.baseUrl.replace(/\/+$/, "")}/?resetToken=${encodeURIComponent(issued.token)}`
+      : null;
+
+    insertAuditRecord({
+      eventType: "password_recovery_issue",
+      titleName: "Workspace",
+      actorUserId: req.user.id,
+      actorDisplayName: req.user.displayName,
+      details: `Issued a password recovery token for ${issued.user.displayName}.`,
+    });
+
+    res.json({
+      recovery: {
+        token: issued.token,
+        expiresAt: issued.expiresAt,
+        resetUrl,
+        userId: issued.user.id,
+      },
+    });
+  } catch (error) {
+    const statusCode = error instanceof Error && error.message === "User not found." ? 404 : 400;
+    res.status(statusCode).json({ error: error instanceof Error ? error.message : "Could not issue recovery token." });
   }
 });
 
@@ -733,6 +862,8 @@ app.delete("/api/titles/:titleId", requireAdmin, async (req, res, next) => {
 app.post("/api/import/youtube", requireUser, (req, res) => {
   const urls = parseYouTubeUrls(req.body?.urls || req.body?.url);
   const language = String(req.body?.language || "en").trim() || "en";
+  const state = buildAppState(req.user.id);
+  const workspaceId = state.selectedWorkspaceId || null;
   if (urls.length === 0) {
     res.status(400).json({ error: "At least one YouTube URL is required." });
     return;
@@ -742,8 +873,9 @@ app.post("/api/import/youtube", requireUser, (req, res) => {
     createJob("youtube_import", req.user.id, {
       url,
       language,
+      workspaceId,
       actorDisplayName: req.user.displayName,
-    }),
+    }, null, workspaceId),
   );
   res.status(202).json({ jobs, job: jobs[0] || null });
 });
@@ -776,6 +908,8 @@ app.post(
     { name: "subtitle", maxCount: 1 },
   ]),
   (req, res) => {
+    const state = buildAppState(req.user.id);
+    const workspaceId = state.selectedWorkspaceId || null;
     const mediaFile = req.files?.media?.[0];
     const subtitleFile = req.files?.subtitle?.[0];
     const probeManifest = readMediaProbeManifest(req.body?.probeToken);
@@ -797,8 +931,9 @@ app.post(
       title: String(req.body?.title || path.basename(effectiveMediaName, path.extname(effectiveMediaName))),
       source: String(req.body?.source || "Uploaded Media"),
       language: String(req.body?.language || "en"),
+      workspaceId,
       actorDisplayName: req.user.displayName,
-    });
+    }, null, workspaceId);
     deleteMediaProbeManifest(req.body?.probeToken);
     res.status(202).json({ job });
   },
@@ -810,10 +945,13 @@ app.post("/api/import/asr", requireUser, upload.single("archive"), (req, res) =>
     return;
   }
 
+  const state = buildAppState(req.user.id);
+  const workspaceId = state.selectedWorkspaceId || null;
   const job = createJob("asr_import", req.user.id, {
     archivePath: req.file.path,
+    workspaceId,
     actorDisplayName: req.user.displayName,
-  });
+  }, null, workspaceId);
 
   res.status(202).json({ job });
 });

@@ -30,8 +30,8 @@ import { getObjectKey, getStorageService } from "./storage.js";
 import { parseSubtitleFile } from "./subtitles.js";
 import { transcribeAudio } from "./transcription.js";
 
-function withUniqueVideoId(videoId) {
-  if (!getTitleByVideoId(videoId)) {
+function withUniqueVideoId(videoId, workspaceId = null) {
+  if (!getTitleByVideoId(videoId, workspaceId)) {
     return videoId;
   }
 
@@ -73,7 +73,7 @@ async function finalizeImportedTitle(job, payload) {
   }
 
   const titleId = randomId("title");
-  const videoId = withUniqueVideoId(payload.videoId || slugify(payload.title) || titleId);
+  const videoId = withUniqueVideoId(payload.videoId || slugify(payload.title) || titleId, payload.workspaceId || null);
   const sizeBytes = audioPath ? fs.statSync(audioPath).size : 0;
   const activeCheckout = getActiveCheckoutForUser(job.createdByUserId);
   const autoCheckout = !activeCheckout;
@@ -84,6 +84,7 @@ async function finalizeImportedTitle(job, payload) {
   createTitleRecord({
     id: titleId,
     videoId,
+    workspaceId: payload.workspaceId || null,
     title: payload.title,
     source: payload.source,
     language: payload.language || "en",

@@ -28,6 +28,7 @@ function buildTitle(partial: Omit<TitleRecord, "savedSnapshot" | "draft">): Titl
 const users: User[] = [
   {
     id: "user-maya",
+    loginIdentity: "maya",
     displayName: "Maya Editor",
     email: "maya@yt-asr.local",
     role: "user",
@@ -39,6 +40,7 @@ const users: User[] = [
   },
   {
     id: "user-jordan",
+    loginIdentity: "jordan",
     displayName: "Jordan Reviewer",
     email: "jordan@yt-asr.local",
     role: "user",
@@ -50,6 +52,7 @@ const users: User[] = [
   },
   {
     id: "admin-theo",
+    loginIdentity: "theo",
     displayName: "Theo Admin",
     email: "theo@yt-asr.local",
     role: "admin",
@@ -58,6 +61,17 @@ const users: User[] = [
     createdAt: "2026-03-01T09:00:00.000Z",
     updatedAt: "2026-03-20T06:42:00.000Z",
     lastLoginAt: "2026-03-20T06:42:00.000Z",
+  },
+];
+
+const workspaces = [
+  {
+    id: "workspace-primary",
+    name: "Shared Workspace",
+    slug: "shared-workspace",
+    createdByUserId: "admin-theo",
+    createdAt: "2026-03-01T09:00:00.000Z",
+    updatedAt: "2026-03-20T06:42:00.000Z",
   },
 ];
 
@@ -180,7 +194,9 @@ export const initialState: PersistedState = {
   currentView: "editor",
   youtubeUrl: "https://www.youtube.com/watch?v=atlantic-jetstream",
   importLanguage: "en",
+  selectedWorkspaceId: "workspace-primary",
   workspaceName: "Shared Workspace",
+  workspaces,
   users,
   titles,
   storage: {

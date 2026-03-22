@@ -8,6 +8,7 @@ export type SaveKind = "manual" | "autosave" | "sync" | "checkin";
 
 export interface User {
   id: string;
+  loginIdentity: string;
   displayName: string;
   email: string;
   role: Role;
@@ -16,6 +17,15 @@ export interface User {
   createdAt: string;
   updatedAt: string;
   lastLoginAt: string | null;
+}
+
+export interface WorkspaceRecord {
+  id: string;
+  name: string;
+  slug: string;
+  createdAt: string;
+  updatedAt: string;
+  createdByUserId: string;
 }
 
 export interface Phrase {
@@ -62,8 +72,11 @@ export interface AuditRecord {
     | "login"
     | "password_change"
     | "password_reset"
+    | "password_recovery_issue"
+    | "password_recovery_redeem"
     | "user_create"
     | "user_update"
+    | "workspace_create"
     | "title_upload"
     | "title_import"
     | "checkout"
@@ -105,6 +118,7 @@ export interface JobRecord {
   status: "queued" | "running" | "completed" | "failed";
   createdByUserId: string;
   titleId: string | null;
+  workspaceId: string | null;
   payload: Record<string, unknown>;
   result: Record<string, unknown> | null;
   error: string | null;
@@ -122,7 +136,9 @@ export interface PersistedState {
   currentView: View;
   youtubeUrl: string;
   importLanguage: string;
+  selectedWorkspaceId: string;
   workspaceName: string;
+  workspaces: WorkspaceRecord[];
   users: User[];
   titles: TitleRecord[];
   storage: StorageConfig;

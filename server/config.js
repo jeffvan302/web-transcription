@@ -79,25 +79,29 @@ export const defaultStorageSettings = {
 
 const developmentUsers = [
   {
-    email: "admin",
+    loginIdentity: "admin",
+    email: "admin@yt-asr.local",
     displayName: "Administrator",
     role: "admin",
     password: "password",
     mustChangePassword: true,
   },
   {
+    loginIdentity: "maya",
     email: "maya@yt-asr.local",
     displayName: "Maya Editor",
     role: "user",
     password: "maya1234",
   },
   {
+    loginIdentity: "jordan",
     email: "jordan@yt-asr.local",
     displayName: "Jordan Reviewer",
     role: "user",
     password: "jordan1234",
   },
   {
+    loginIdentity: "theo",
     email: "theo@yt-asr.local",
     displayName: "Theo Admin",
     role: "admin",
@@ -106,7 +110,8 @@ const developmentUsers = [
 ];
 
 const fallbackBootstrapAdmin = {
-  email: process.env.BOOTSTRAP_ADMIN_EMAIL || "admin",
+  loginIdentity: process.env.BOOTSTRAP_ADMIN_LOGIN_IDENTITY || "admin",
+  email: process.env.BOOTSTRAP_ADMIN_EMAIL || "admin@yt-asr.local",
   displayName: process.env.BOOTSTRAP_ADMIN_DISPLAY_NAME || "Administrator",
   role: "admin",
   password: process.env.BOOTSTRAP_ADMIN_PASSWORD || "password",
@@ -125,7 +130,7 @@ function parseBootstrapUsers() {
     }
   }
 
-  if (process.env.BOOTSTRAP_ADMIN_EMAIL && process.env.BOOTSTRAP_ADMIN_PASSWORD) {
+  if (process.env.BOOTSTRAP_ADMIN_PASSWORD) {
     return [
       {
         ...fallbackBootstrapAdmin,
