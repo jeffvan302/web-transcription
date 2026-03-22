@@ -511,6 +511,27 @@ h3 {
   gap: 0.9rem;
 }
 
+.user-maintenance-layout {
+  display: grid;
+  gap: 1rem;
+  grid-template-columns: minmax(260px, 0.8fr) minmax(0, 1.2fr);
+  align-items: start;
+}
+
+.user-selector-list {
+  display: grid;
+  gap: 0.8rem;
+}
+
+.user-selector {
+  width: 100%;
+}
+
+.user-editor-panel {
+  display: grid;
+  gap: 1rem;
+}
+
 .warning-note {
   color: var(--amber);
 }
@@ -633,7 +654,8 @@ h3 {
   .settings-grid,
   .audit-grid,
   .settings-form,
-  .timing-grid {
+  .timing-grid,
+  .user-maintenance-layout {
     grid-template-columns: 1fr;
   }
 

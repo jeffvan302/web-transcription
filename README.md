@@ -115,6 +115,7 @@ Important notes:
 - The app stores SQLite data, uploads, generated waveforms, and local object storage under `data/`, so a persistent volume is required for a real deployment.
 - If you want to mount your volume somewhere else, set `APP_DATA_DIR` to the mounted path.
 - You can keep the admin storage provider on `Local Disk`, or preconfigure a hosted S3-compatible target at boot with `STORAGE_PROVIDER`, `STORAGE_BUCKET`, `STORAGE_PREFIX`, `STORAGE_ENDPOINT_URL`, `STORAGE_REGION`, `STORAGE_ADDRESSING_MODE`, `STORAGE_ACCESS_KEY_ID`, and `STORAGE_SECRET_ACCESS_KEY`.
+- `STORAGE_ENDPOINT_URL` can be either a full URL or a bare hostname such as `s3.us-east-005.backblazeb2.com`; the server normalizes bare hostnames to HTTPS automatically.
 - Railway Buckets or any S3-compatible provider can be wired through the admin storage settings because the backend supports S3-compatible object storage.
 - Leave Railway Serverless disabled for this service for now. Background import/transcription jobs run inside the web process, so sleeping the service can interrupt long-running jobs.
 

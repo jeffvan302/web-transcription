@@ -1,6 +1,7 @@
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import dotenv from "dotenv";
+import { normalizeEndpointUrl } from "./helpers.js";
 
 dotenv.config();
 
@@ -67,7 +68,7 @@ export const defaultStorageSettings = {
   provider: envStorageProvider,
   bucket: process.env.STORAGE_BUCKET || (envStorageProvider === "Local Disk" ? "yt-asr-local" : ""),
   prefix: process.env.STORAGE_PREFIX || "workspace/",
-  endpointUrl: process.env.STORAGE_ENDPOINT_URL || "",
+  endpointUrl: normalizeEndpointUrl(process.env.STORAGE_ENDPOINT_URL),
   region: process.env.STORAGE_REGION || (envStorageProvider === "Local Disk" ? "local" : "auto"),
   addressingMode: process.env.STORAGE_ADDRESSING_MODE || "path",
   accessKeyId: process.env.STORAGE_ACCESS_KEY_ID || "",

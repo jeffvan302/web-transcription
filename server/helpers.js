@@ -106,3 +106,16 @@ export function copyFileSync(sourcePath, destinationPath) {
   ensureDir(path.dirname(destinationPath));
   fs.copyFileSync(sourcePath, destinationPath);
 }
+
+export function normalizeEndpointUrl(value) {
+  const trimmed = String(value || "").trim();
+  if (!trimmed) {
+    return "";
+  }
+
+  if (/^[a-z]+:\/\//i.test(trimmed)) {
+    return trimmed.replace(/\/+$/, "");
+  }
+
+  return `https://${trimmed.replace(/\/+$/, "")}`;
+}

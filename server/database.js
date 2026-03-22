@@ -1,7 +1,7 @@
 import Database from "better-sqlite3";
 import bcrypt from "bcryptjs";
 import { appConfig, defaultStorageSettings, paths, seededUsers } from "./config.js";
-import { ensureDir, humanFileSize, nowIso, parseJson, randomId } from "./helpers.js";
+import { ensureDir, humanFileSize, normalizeEndpointUrl, nowIso, parseJson, randomId } from "./helpers.js";
 
 ensureDir(paths.dataDir);
 
@@ -480,7 +480,7 @@ export function getStorageSettings(includeSecrets = false) {
     provider: row.provider,
     bucket: row.bucket,
     prefix: row.prefix_value,
-    endpointUrl: row.endpoint_url,
+    endpointUrl: normalizeEndpointUrl(row.endpoint_url),
     region: row.region,
     addressingMode: row.addressing_mode,
     lastConnectionTestAt: row.last_connection_test_at,
@@ -499,6 +499,7 @@ export function getStorageSettings(includeSecrets = false) {
 }
 
 export function saveStorageSettings(input) {
+  const normalizedEndpointUrl = normalizeEndpointUrl(input.endpointUrl);
   db.prepare(`
     UPDATE storage_settings
     SET
@@ -516,7 +517,7 @@ export function saveStorageSettings(input) {
     provider: input.provider,
     bucket: input.bucket,
     prefix: input.prefix,
-    endpointUrl: input.endpointUrl,
+    endpointUrl: normalizedEndpointUrl,
     region: input.region,
     addressingMode: input.addressingMode,
     accessKeyIdChanged: input.accessKeyIdChanged ? 1 : 0,

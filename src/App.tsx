@@ -165,6 +165,7 @@ export default function App() {
     mustChangePassword: true,
   });
   const [userDrafts, setUserDrafts] = useState<Record<string, UserAdminDraft>>({});
+  const [selectedManagedUserId, setSelectedManagedUserId] = useState("");
   const [storageAccessKeyId, setStorageAccessKeyId] = useState("");
   const [storageSecretAccessKey, setStorageSecretAccessKey] = useState("");
 
@@ -185,6 +186,9 @@ export default function App() {
     selectedTitle?.phrases[0] ??
     null;
   const passwordChangeRequired = Boolean(currentUser?.mustChangePassword);
+  const selectedManagedUser =
+    appState.users.find((user) => user.id === selectedManagedUserId) ?? appState.users[0] ?? null;
+  const selectedManagedUserDraft = selectedManagedUser ? userDrafts[selectedManagedUser.id] ?? null : null;
   const editable = Boolean(currentUser && selectedTitle?.checkedOutByUserId === currentUser.id);
   const canEdit = editable && !saveInFlight && !passwordChangeRequired;
   const viewRange = selectedTitle ? selectedTitle.duration / waveZoom : 10;
@@ -238,6 +242,17 @@ export default function App() {
       });
       return nextDrafts;
     });
+  }, [appState.users]);
+
+  useEffect(() => {
+    if (appState.users.length === 0) {
+      setSelectedManagedUserId("");
+      return;
+    }
+
+    setSelectedManagedUserId((current) =>
+      current && appState.users.some((user) => user.id === current) ? current : appState.users[0].id,
+    );
   }, [appState.users]);
 
   useEffect(() => {
@@ -631,6 +646,7 @@ export default function App() {
       mustChangePassword: true,
     });
     setUserDrafts({});
+    setSelectedManagedUserId("");
     setMediaTitle("");
     setMediaSource("");
     setMediaLanguage("en");
@@ -2373,11 +2389,11 @@ export default function App() {
             </section>
 
             {currentUser.role === "admin" ? (
-              <section className="card form-card span-two">
+              <section className="card form-card">
                 <div className="card-header">
                   <div>
-                    <span className="eyebrow">User Management</span>
-                    <h3>Create and Maintain Accounts</h3>
+                    <span className="eyebrow">Create User</span>
+                    <h3>Add a New Account</h3>
                   </div>
                   <button className="toolbar-button primary" onClick={() => void submitCreateUser()} type="button">
                     Create User
@@ -2436,91 +2452,136 @@ export default function App() {
                     <span>Require password change at first sign-in</span>
                   </label>
                 </div>
+              </section>
+            ) : null}
 
-                <div className="user-admin-grid">
-                  {appState.users.map((user) => {
-                    const draft = userDrafts[user.id];
-                    if (!draft) {
-                      return null;
-                    }
-                    return (
-                      <article className="audit-item user-admin-card" key={user.id}>
-                        <div className="audit-top">
+            {currentUser.role === "admin" ? (
+              <section className="card form-card span-two">
+                <div className="card-header">
+                  <div>
+                    <span className="eyebrow">User Maintenance</span>
+                    <h3>Select a User to Edit</h3>
+                  </div>
+                </div>
+
+                <div className="user-maintenance-layout">
+                  <div className="user-selector-list">
+                    {appState.users.map((user) => (
+                      <button
+                        key={user.id}
+                        className={`title-card user-selector ${selectedManagedUser?.id === user.id ? "active" : ""}`}
+                        onClick={() => setSelectedManagedUserId(user.id)}
+                        type="button"
+                      >
+                        <div className="title-card-top">
                           <strong>{user.displayName}</strong>
-                          <span>{user.role}</span>
+                          <span className="pill">{user.role}</span>
                         </div>
                         <span>{user.email}</span>
-                        <div className="settings-form">
-                          <label className="field">
-                            <span>Display name</span>
-                            <input
-                              value={draft.displayName}
-                              onChange={(event) =>
-                                updateUserDraft(user.id, (current) => ({ ...current, displayName: event.target.value }))
-                              }
-                            />
-                          </label>
-                          <label className="field">
-                            <span>Role</span>
-                            <select
-                              value={draft.role}
-                              onChange={(event) =>
-                                updateUserDraft(user.id, (current) => ({ ...current, role: event.target.value as Role }))
-                              }
-                            >
-                              <option value="user">User</option>
-                              <option value="admin">Admin</option>
-                            </select>
-                          </label>
-                          <label className="field">
-                            <span>Status</span>
-                            <select
-                              value={draft.status}
-                              onChange={(event) =>
-                                updateUserDraft(user.id, (current) => ({ ...current, status: event.target.value as UserStatus }))
-                              }
-                            >
-                              <option value="active">Active</option>
-                              <option value="disabled">Disabled</option>
-                            </select>
-                          </label>
-                          <label className="field">
-                            <span>Reset password</span>
-                            <input
-                              type="password"
-                              value={draft.resetPassword}
-                              onChange={(event) =>
-                                updateUserDraft(user.id, (current) => ({ ...current, resetPassword: event.target.value }))
-                              }
-                              placeholder="Leave blank to keep current password"
-                            />
-                          </label>
-                          <label className="check-field">
-                            <input
-                              type="checkbox"
-                              checked={draft.mustChangePassword}
-                              onChange={(event) =>
-                                updateUserDraft(user.id, (current) => ({ ...current, mustChangePassword: event.target.checked }))
-                              }
-                            />
-                            <span>Require password change after reset</span>
-                          </label>
+                        <div className="title-meta">
+                          <span>{user.status}</span>
+                          <span>{user.mustChangePassword ? "Password reset pending" : "Password active"}</span>
                         </div>
-                        <div className="button-row">
-                          <button className="toolbar-button" onClick={() => void saveManagedUser(user.id)} type="button">
-                            Save User
-                          </button>
-                          <button className="toolbar-button primary" onClick={() => void resetManagedUserPassword(user.id)} type="button">
-                            Reset Password
-                          </button>
-                        </div>
-                        <div className="settings-note">
-                          Last sign-in {formatTimestamp(user.lastLoginAt)} / created {formatTimestamp(user.createdAt)} /
-                          updated {formatTimestamp(user.updatedAt)}
-                        </div>
-                      </article>
-                    );
-                  })}
+                      </button>
+                    ))}
+                  </div>
+
+                  {selectedManagedUser && selectedManagedUserDraft ? (
+                    <article className="audit-item user-editor-panel">
+                      <div className="audit-top">
+                        <strong>{selectedManagedUser.displayName}</strong>
+                        <span>{selectedManagedUser.email}</span>
+                      </div>
+                      <div className="settings-form">
+                        <label className="field">
+                          <span>Display name</span>
+                          <input
+                            value={selectedManagedUserDraft.displayName}
+                            onChange={(event) =>
+                              updateUserDraft(selectedManagedUser.id, (current) => ({
+                                ...current,
+                                displayName: event.target.value,
+                              }))
+                            }
+                          />
+                        </label>
+                        <label className="field">
+                          <span>Role</span>
+                          <select
+                            value={selectedManagedUserDraft.role}
+                            onChange={(event) =>
+                              updateUserDraft(selectedManagedUser.id, (current) => ({
+                                ...current,
+                                role: event.target.value as Role,
+                              }))
+                            }
+                          >
+                            <option value="user">User</option>
+                            <option value="admin">Admin</option>
+                          </select>
+                        </label>
+                        <label className="field">
+                          <span>Status</span>
+                          <select
+                            value={selectedManagedUserDraft.status}
+                            onChange={(event) =>
+                              updateUserDraft(selectedManagedUser.id, (current) => ({
+                                ...current,
+                                status: event.target.value as UserStatus,
+                              }))
+                            }
+                          >
+                            <option value="active">Active</option>
+                            <option value="disabled">Disabled</option>
+                          </select>
+                        </label>
+                        <label className="field">
+                          <span>Reset password</span>
+                          <input
+                            type="password"
+                            value={selectedManagedUserDraft.resetPassword}
+                            onChange={(event) =>
+                              updateUserDraft(selectedManagedUser.id, (current) => ({
+                                ...current,
+                                resetPassword: event.target.value,
+                              }))
+                            }
+                            placeholder="Leave blank to keep current password"
+                          />
+                        </label>
+                        <label className="check-field">
+                          <input
+                            type="checkbox"
+                            checked={selectedManagedUserDraft.mustChangePassword}
+                            onChange={(event) =>
+                              updateUserDraft(selectedManagedUser.id, (current) => ({
+                                ...current,
+                                mustChangePassword: event.target.checked,
+                              }))
+                            }
+                          />
+                          <span>Require password change after reset</span>
+                        </label>
+                      </div>
+                      <div className="button-row">
+                        <button className="toolbar-button" onClick={() => void saveManagedUser(selectedManagedUser.id)} type="button">
+                          Save User
+                        </button>
+                        <button
+                          className="toolbar-button primary"
+                          onClick={() => void resetManagedUserPassword(selectedManagedUser.id)}
+                          type="button"
+                        >
+                          Reset Password
+                        </button>
+                      </div>
+                      <div className="settings-note">
+                        Last sign-in {formatTimestamp(selectedManagedUser.lastLoginAt)} / created{" "}
+                        {formatTimestamp(selectedManagedUser.createdAt)} / updated{" "}
+                        {formatTimestamp(selectedManagedUser.updatedAt)}
+                      </div>
+                    </article>
+                  ) : null}
                 </div>
               </section>
             ) : null}
@@ -2568,6 +2629,7 @@ export default function App() {
                     <input
                       value={appState.storage.endpointUrl}
                       onChange={(event) => updateStorage("endpointUrl", event.target.value)}
+                      placeholder="s3.us-east-005.backblazeb2.com"
                     />
                   </label>
                   <label className="field">
@@ -2609,6 +2671,10 @@ export default function App() {
                       placeholder="Leave blank to keep current server secret"
                     />
                   </label>
+                </div>
+                <div className="settings-note">
+                  Bare hostnames are accepted here. For example, `s3.us-east-005.backblazeb2.com` will be normalized to
+                  HTTPS automatically.
                 </div>
                 <div className="settings-note">Last connection test: {formatTimestamp(appState.storage.lastConnectionTestAt)}</div>
               </section>
