@@ -151,6 +151,76 @@ function centerWavePan(duration: number, viewRange: number, focusTime: number) {
   return clamp(focusTime - viewRange / 2, 0, Math.max(0, duration - viewRange));
 }
 
+function waitForAudioMetadata(audio: HTMLAudioElement) {
+  if (audio.readyState >= 1) {
+    return Promise.resolve();
+  }
+
+  return new Promise<void>((resolve, reject) => {
+    let timeoutId = 0;
+
+    const cleanup = () => {
+      window.clearTimeout(timeoutId);
+      audio.removeEventListener("loadedmetadata", handleLoadedMetadata);
+      audio.removeEventListener("error", handleError);
+    };
+
+    const handleLoadedMetadata = () => {
+      cleanup();
+      resolve();
+    };
+
+    const handleError = () => {
+      cleanup();
+      reject(new Error("Audio metadata could not be loaded."));
+    };
+
+    timeoutId = window.setTimeout(() => {
+      cleanup();
+      reject(new Error("Audio metadata timed out while loading."));
+    }, 5000);
+
+    audio.addEventListener("loadedmetadata", handleLoadedMetadata);
+    audio.addEventListener("error", handleError);
+  });
+}
+
+function seekAudio(audio: HTMLAudioElement, time: number) {
+  const duration = Number.isFinite(audio.duration) && audio.duration > 0 ? audio.duration : null;
+  const target = clamp(time, 0, duration ?? time);
+  if (Math.abs(audio.currentTime - target) < 0.02) {
+    return Promise.resolve(target);
+  }
+
+  return new Promise<number>((resolve) => {
+    let timeoutId = 0;
+
+    const cleanup = () => {
+      window.clearTimeout(timeoutId);
+      audio.removeEventListener("seeked", handleSeeked);
+    };
+
+    const handleSeeked = () => {
+      cleanup();
+      resolve(audio.currentTime);
+    };
+
+    timeoutId = window.setTimeout(() => {
+      cleanup();
+      resolve(audio.currentTime);
+    }, 1200);
+
+    audio.addEventListener("seeked", handleSeeked);
+
+    try {
+      audio.currentTime = target;
+    } catch {
+      cleanup();
+      resolve(audio.currentTime);
+    }
+  });
+}
+
 export default function App() {
   const [appState, setAppState] = useState<PersistedState>(EMPTY_STATE);
   const [jobs, setJobs] = useState<JobRecord[]>([]);
@@ -512,24 +582,25 @@ export default function App() {
 
     pauseAudio(audio, "stop");
     if (selectedTitle?.audioUrl) {
-      const syncToSelectedPhraseStart = () => {
+      const syncToSelectedPhraseStart = async () => {
         const nextStart = selectedPhraseRef.current?.start ?? 0;
         try {
-          audio.currentTime = nextStart;
+          await waitForAudioMetadata(audio);
+          const actualTime = await seekAudio(audio, nextStart);
+          setPlayheadTime(actualTime);
         } catch {
-          // Ignore seeks before metadata becomes ready.
+          setPlayheadTime(nextStart);
         }
-        setPlayheadTime(nextStart);
       };
 
       const handleLoadedMetadata = () => {
-        syncToSelectedPhraseStart();
+        void syncToSelectedPhraseStart();
       };
 
       audio.src = selectedTitle.audioUrl;
       audio.addEventListener("loadedmetadata", handleLoadedMetadata, { once: true });
       audio.load();
-      syncToSelectedPhraseStart();
+      void syncToSelectedPhraseStart();
       setPlaybackState("stopped");
       return () => {
         audio.removeEventListener("loadedmetadata", handleLoadedMetadata);
@@ -671,11 +742,15 @@ export default function App() {
     }
 
     if (audio && selectedTitle?.audioUrl) {
-      try {
-        audio.currentTime = selectedPhrase.start;
-      } catch {
-        // Ignore seeks before metadata becomes ready.
-      }
+      void waitForAudioMetadata(audio)
+        .then(() => seekAudio(audio, selectedPhrase.start))
+        .then((actualTime) => {
+          setPlayheadTime(actualTime);
+        })
+        .catch(() => {
+          setPlayheadTime(selectedPhrase.start);
+        });
+      return;
     }
     setPlayheadTime(selectedPhrase.start);
   }, [selectedPhrase?.id, selectedTitle?.id, selectedTitle?.audioUrl]);
@@ -1132,7 +1207,7 @@ export default function App() {
     resetToLoggedOutState("Session ended. Any active checkout stayed on the server.");
   }
 
-  function play(action: PlaybackState) {
+  async function play(action: PlaybackState) {
     const audio = audioRef.current;
     if (!selectedPhrase || !audio || !selectedTitle?.audioUrl) {
       postStatus("warning", "This title does not have playable working audio yet.");
@@ -1141,23 +1216,18 @@ export default function App() {
 
     if (action === "playing") {
       try {
-        audio.currentTime = selectedPhrase.start;
-      } catch {
-        // Ignore seeks before metadata becomes ready.
+        await waitForAudioMetadata(audio);
+        const actualStart = await seekAudio(audio, selectedPhrase.start);
+        audio.playbackRate = playbackSpeed;
+        playbackCommandRef.current = null;
+        setPlayheadTime(actualStart);
+        await audio.play();
+        setPlaybackState("playing");
+        postStatus("info", `Playback ${playbackSpeed.toFixed(2)}x on the selected phrase.`);
+      } catch (error) {
+        setPlaybackState("stopped");
+        postStatus("error", error instanceof Error ? error.message : "Browser playback could not start for this phrase.");
       }
-      audio.playbackRate = playbackSpeed;
-      playbackCommandRef.current = null;
-      setPlayheadTime(selectedPhrase.start);
-      void audio
-        .play()
-        .then(() => {
-          setPlaybackState("playing");
-        })
-        .catch(() => {
-          setPlaybackState("stopped");
-          postStatus("error", "Browser playback could not start for this phrase.");
-        });
-      postStatus("info", `Playback ${playbackSpeed.toFixed(2)}x on the selected phrase.`);
       return;
     }
     if (action === "paused") {
@@ -1167,12 +1237,14 @@ export default function App() {
     }
     if (action === "stopped") {
       pauseAudio(audio, "stop");
-      try {
-        audio.currentTime = selectedPhrase.start;
-      } catch {
-        // Ignore seeks before metadata becomes ready.
-      }
-      setPlayheadTime(selectedPhrase.start);
+      void waitForAudioMetadata(audio)
+        .then(() => seekAudio(audio, selectedPhrase.start))
+        .then((actualTime) => {
+          setPlayheadTime(actualTime);
+        })
+        .catch(() => {
+          setPlayheadTime(selectedPhrase.start);
+        });
       setPlaybackState("stopped");
       return;
     }
