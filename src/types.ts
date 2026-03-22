@@ -2,7 +2,7 @@ export type Role = "user" | "admin";
 export type StatusTone = "info" | "success" | "warning" | "error";
 export type View = "editor" | "shared" | "settings";
 export type SourceType = "youtube" | "local" | "package";
-export type StorageProvider = "Backblaze B2" | "Amazon S3" | "Cloudflare R2" | "MinIO";
+export type StorageProvider = "Local Disk" | "Backblaze B2" | "Amazon S3" | "Cloudflare R2" | "MinIO";
 export type SaveKind = "manual" | "autosave" | "sync" | "checkin";
 
 export interface User {
@@ -48,6 +48,8 @@ export interface TitleRecord {
   savedSnapshot: Phrase[];
   draft: TitleDraftMeta;
   badge: "reviewed" | "downloaded" | null;
+  audioUrl?: string | null;
+  waveformUrl?: string | null;
 }
 
 export interface AuditRecord {
@@ -82,6 +84,22 @@ export interface StorageConfig {
   auditVisible: boolean;
 }
 
+export interface JobRecord {
+  id: string;
+  type: "youtube_import" | "media_import" | "asr_import";
+  status: "queued" | "running" | "completed" | "failed";
+  createdByUserId: string;
+  titleId: string | null;
+  payload: Record<string, unknown>;
+  result: Record<string, unknown> | null;
+  error: string | null;
+  progress: number;
+  message: string | null;
+  createdAt: string;
+  startedAt: string | null;
+  completedAt: string | null;
+}
+
 export interface PersistedState {
   sessionUserId: string | null;
   selectedTitleId: string;
@@ -94,4 +112,9 @@ export interface PersistedState {
   titles: TitleRecord[];
   storage: StorageConfig;
   audit: AuditRecord[];
+}
+
+export interface AppStateResponse {
+  state: PersistedState;
+  jobs: JobRecord[];
 }

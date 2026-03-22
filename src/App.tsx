@@ -1,20 +1,24 @@
-import { useEffect, useRef, useState } from "react";
-import { initialState } from "./mockData";
+import { type ChangeEvent, useEffect, useRef, useState } from "react";
+import { api } from "./api";
 import type {
-  AuditRecord,
+  AppStateResponse,
+  JobRecord,
   PersistedState,
   Phrase,
   SaveKind,
   StatusTone,
   StorageProvider,
   TitleRecord,
-  User,
   View,
 } from "./types";
 
-const STORAGE_KEY = "yt-asr-web-gui-state";
 const LANGUAGES = ["en", "es", "fr", "de", "pt-BR"];
 const WORKSPACES = ["Shared Workspace", "Review Queue", "Archive Preview"];
+const DEV_ACCOUNTS = [
+  { email: "maya@yt-asr.local", password: "maya1234", label: "Maya Editor" },
+  { email: "jordan@yt-asr.local", password: "jordan1234", label: "Jordan Reviewer" },
+  { email: "theo@yt-asr.local", password: "admin1234", label: "Theo Admin" },
+];
 
 type PlaybackState = "stopped" | "playing" | "paused";
 type DragState =
@@ -26,6 +30,29 @@ interface StatusMessage {
   tone: StatusTone;
   text: string;
 }
+
+const EMPTY_STATE: PersistedState = {
+  sessionUserId: null,
+  selectedTitleId: "",
+  selectedPhraseIds: [],
+  currentView: "editor",
+  youtubeUrl: "",
+  importLanguage: "en",
+  workspaceName: WORKSPACES[0],
+  users: [],
+  titles: [],
+  storage: {
+    provider: "Local Disk",
+    bucket: "yt-asr-local",
+    prefix: "workspace/",
+    endpointUrl: "",
+    region: "local",
+    addressingMode: "path",
+    lastConnectionTestAt: null,
+    auditVisible: true,
+  },
+  audit: [],
+};
 
 function clonePhrases(phrases: Phrase[]) {
   return phrases.map((phrase) => ({ ...phrase }));
@@ -75,26 +102,17 @@ function createWavePoints(width: number, height: number) {
   return points.join(" ");
 }
 
-function loadState(): PersistedState {
-  const raw = window.localStorage.getItem(STORAGE_KEY);
-  if (!raw) {
-    return initialState;
-  }
-
-  try {
-    return JSON.parse(raw) as PersistedState;
-  } catch {
-    return initialState;
-  }
-}
-
 export default function App() {
-  const [appState, setAppState] = useState<PersistedState>(() => loadState());
+  const [appState, setAppState] = useState<PersistedState>(EMPTY_STATE);
+  const [jobs, setJobs] = useState<JobRecord[]>([]);
   const [status, setStatus] = useState<StatusMessage>({
     tone: "info",
-    text: "Ready. Open a title to continue the server-draft workflow.",
+    text: "Connecting to the server workspace...",
   });
-  const [loginSelectionId, setLoginSelectionId] = useState("user-maya");
+  const [loadingState, setLoadingState] = useState(true);
+  const [authInFlight, setAuthInFlight] = useState(false);
+  const [loginEmail, setLoginEmail] = useState(DEV_ACCOUNTS[2].email);
+  const [loginPassword, setLoginPassword] = useState(DEV_ACCOUNTS[2].password);
   const [playbackState, setPlaybackState] = useState<PlaybackState>("stopped");
   const [loopPlayback, setLoopPlayback] = useState(false);
   const [playbackSpeed, setPlaybackSpeed] = useState(1);
@@ -106,10 +124,19 @@ export default function App() {
   const [dragState, setDragState] = useState<DragState>(null);
   const [timingDraft, setTimingDraft] = useState({ start: "0.00", end: "0.00" });
   const [saveInFlight, setSaveInFlight] = useState(false);
+  const [mediaTitle, setMediaTitle] = useState("");
+  const [mediaSource, setMediaSource] = useState("");
+  const [mediaLanguage, setMediaLanguage] = useState("en");
+  const [mediaFile, setMediaFile] = useState<File | null>(null);
+  const [subtitleFile, setSubtitleFile] = useState<File | null>(null);
+  const [storageAccessKeyId, setStorageAccessKeyId] = useState("");
+  const [storageSecretAccessKey, setStorageSecretAccessKey] = useState("");
 
   const textareaRef = useRef<HTMLTextAreaElement | null>(null);
   const waveformRef = useRef<SVGSVGElement | null>(null);
-  const playbackTimerRef = useRef<number | null>(null);
+  const audioRef = useRef<HTMLAudioElement | null>(null);
+  const asrImportInputRef = useRef<HTMLInputElement | null>(null);
+  const seenTerminalJobsRef = useRef<Set<string>>(new Set());
 
   const currentUser = appState.users.find((user) => user.id === appState.sessionUserId) ?? null;
   const selectedTitle =
@@ -133,8 +160,8 @@ export default function App() {
   });
 
   useEffect(() => {
-    window.localStorage.setItem(STORAGE_KEY, JSON.stringify(appState));
-  }, [appState]);
+    void hydrateSession();
+  }, []);
 
   useEffect(() => {
     if (!selectedPhrase) {
@@ -189,37 +216,165 @@ export default function App() {
   }, [appState.titles, editable, saveInFlight, selectedTitle?.id, textDraftDirty]);
 
   useEffect(() => {
-    if (playbackState !== "playing" || !selectedPhrase) {
-      if (playbackTimerRef.current) {
-        window.clearInterval(playbackTimerRef.current);
-        playbackTimerRef.current = null;
-      }
+    const audio = new Audio();
+    audio.preload = "auto";
+    audioRef.current = audio;
+
+    const handlePause = () => {
+      setPlaybackState((current) => (current === "stopped" ? current : "paused"));
+    };
+    const handleEnded = () => {
+      setPlaybackState("stopped");
+      setPlayheadTime(selectedPhrase?.end ?? null);
+    };
+
+    audio.addEventListener("pause", handlePause);
+    audio.addEventListener("ended", handleEnded);
+
+    return () => {
+      audio.pause();
+      audio.removeEventListener("pause", handlePause);
+      audio.removeEventListener("ended", handleEnded);
+      audioRef.current = null;
+    };
+  }, [selectedPhrase?.end]);
+
+  useEffect(() => {
+    const audio = audioRef.current;
+    if (!audio) {
       return;
     }
 
-    playbackTimerRef.current = window.setInterval(() => {
-      setPlayheadTime((current) => {
-        const start = selectedPhrase.start;
-        const end = selectedPhrase.end;
-        const next = current === null ? start : current + 0.1 * playbackSpeed;
-        if (next >= end) {
-          if (loopPlayback) {
-            return start;
-          }
-          setPlaybackState("stopped");
-          return end;
-        }
-        return next;
-      });
-    }, 100);
+    audio.playbackRate = playbackSpeed;
+  }, [playbackSpeed]);
 
-    return () => {
-      if (playbackTimerRef.current) {
-        window.clearInterval(playbackTimerRef.current);
-        playbackTimerRef.current = null;
+  useEffect(() => {
+    const audio = audioRef.current;
+    if (!audio) {
+      return;
+    }
+
+    if (selectedTitle?.audioUrl) {
+      audio.src = selectedTitle.audioUrl;
+      audio.load();
+      setPlayheadTime(selectedPhrase?.start ?? 0);
+    } else {
+      audio.pause();
+      audio.removeAttribute("src");
+      setPlayheadTime(null);
+    }
+    setPlaybackState("stopped");
+  }, [selectedTitle?.id, selectedTitle?.audioUrl, selectedPhrase?.start]);
+
+  useEffect(() => {
+    const audio = audioRef.current;
+    if (!audio || !selectedPhrase) {
+      return;
+    }
+
+    const handleTimeUpdate = () => {
+      const current = audio.currentTime;
+      setPlayheadTime(current);
+      if (current >= selectedPhrase.end) {
+        if (loopPlayback) {
+          audio.currentTime = selectedPhrase.start;
+          void audio.play().catch(() => undefined);
+        } else {
+          audio.pause();
+          setPlaybackState("stopped");
+          setPlayheadTime(selectedPhrase.end);
+        }
       }
     };
-  }, [loopPlayback, playbackSpeed, playbackState, selectedPhrase]);
+
+    audio.addEventListener("timeupdate", handleTimeUpdate);
+    return () => {
+      audio.removeEventListener("timeupdate", handleTimeUpdate);
+    };
+  }, [loopPlayback, selectedPhrase?.end, selectedPhrase?.start, selectedPhrase?.id]);
+
+  useEffect(() => {
+    if (!currentUser) {
+      setJobs([]);
+      seenTerminalJobsRef.current.clear();
+      return;
+    }
+
+    let cancelled = false;
+
+    const pollJobs = async () => {
+      try {
+        const response = await api.getJobs();
+        if (cancelled) {
+          return;
+        }
+
+        setJobs(response.jobs);
+        const unseenTerminalJobs = response.jobs.filter(
+          (job) =>
+            (job.status === "completed" || job.status === "failed") && !seenTerminalJobsRef.current.has(job.id),
+        );
+
+        if (unseenTerminalJobs.length > 0) {
+          unseenTerminalJobs.forEach((job) => seenTerminalJobsRef.current.add(job.id));
+          const latestJob = unseenTerminalJobs[0];
+          if (latestJob.status === "completed") {
+            postStatus("success", latestJob.message || `${latestJob.type.replaceAll("_", " ")} completed.`);
+            const stateResponse = await api.getState();
+            if (!cancelled) {
+              applyServerResponse(stateResponse);
+            }
+          } else {
+            postStatus("error", latestJob.error || `${latestJob.type.replaceAll("_", " ")} failed.`);
+          }
+        }
+      } catch {
+        if (!cancelled) {
+          postStatus("warning", "Job polling could not reach the server.");
+        }
+      }
+    };
+
+    void pollJobs();
+    const interval = window.setInterval(() => {
+      void pollJobs();
+    }, 3000);
+
+    return () => {
+      cancelled = true;
+      window.clearInterval(interval);
+    };
+  }, [currentUser?.id]);
+
+  useEffect(() => {
+    if (!currentUser) {
+      return;
+    }
+
+    if (appState.currentView === "shared") {
+      void refreshState(false);
+    }
+  }, [appState.currentView, currentUser?.id]);
+
+  useEffect(() => {
+    if (!selectedTitle || selectedTitle.checkedOutByUserId === currentUser?.id) {
+      return;
+    }
+
+    if (playbackState === "playing") {
+      const audio = audioRef.current;
+      if (audio) {
+        audio.pause();
+      }
+      setPlaybackState("stopped");
+    }
+  }, [currentUser?.id, playbackState, selectedTitle?.checkedOutByUserId]);
+
+  useEffect(() => {
+    if (!selectedTitle?.audioUrl && playbackState === "playing") {
+      setPlaybackState("stopped");
+    }
+  }, [playbackState, selectedTitle?.audioUrl]);
 
   useEffect(() => {
     if (!dragState || !selectedTitle || !selectedPhrase || !waveformRef.current) {
@@ -297,62 +452,96 @@ export default function App() {
     }));
   }
 
-  function pushAudit(eventType: AuditRecord["eventType"], title: TitleRecord | null, actor: User, details: string) {
-    updateState((current) => ({
-      ...current,
-      audit: [
-        {
-          id: makeId("audit"),
-          eventType,
-          titleId: title?.id ?? null,
-          titleName: title?.title ?? "Workspace",
-          actorUserId: actor.id,
-          actorDisplayName: actor.displayName,
-          timestamp: new Date().toISOString(),
-          details,
-        },
-        ...current.audit,
-      ].slice(0, 20),
-    }));
+  function applyServerResponse(response: AppStateResponse) {
+    setAppState(response.state);
+    setJobs(response.jobs);
+    setLoadingState(false);
+  }
+
+  function resetToLoggedOutState(message: string) {
+    setAppState(EMPTY_STATE);
+    setJobs([]);
+    setLoadingState(false);
+    setPlaybackState("stopped");
+    setPlayheadTime(null);
+    postStatus("info", message);
+  }
+
+  async function hydrateSession() {
+    try {
+      const response = await api.getSession();
+      applyServerResponse(response);
+      postStatus("success", "Session restored from the server.");
+    } catch {
+      resetToLoggedOutState("Sign in to open the hosted transcription workspace.");
+    }
+  }
+
+  async function refreshState(showStatus = true) {
+    if (!currentUser) {
+      return;
+    }
+
+    try {
+      const response = await api.getState();
+      applyServerResponse(response);
+      if (showStatus) {
+        postStatus("info", "Library metadata refreshed from the server.");
+      }
+    } catch (error) {
+      postStatus("error", error instanceof Error ? error.message : "Could not refresh the library.");
+    }
+  }
+
+  function buildTitlePayload(titleId: string) {
+    const title = appState.titles.find((entry) => entry.id === titleId);
+    if (!title) {
+      return null;
+    }
+
+    if (!selectedTitle || selectedTitle.id !== titleId || !selectedPhrase || !textDraftDirty) {
+      return title;
+    }
+
+    const nextText = textDraft.trim() || "<Sentence>";
+    return {
+      ...title,
+      phrases: title.phrases.map((phrase) =>
+        phrase.id === selectedPhrase.id ? { ...phrase, text: nextText, reviewed: true } : phrase,
+      ),
+    };
   }
 
   async function saveTitle(kind: SaveKind, titleId: string) {
-    const title = appState.titles.find((entry) => entry.id === titleId);
+    const title = buildTitlePayload(titleId);
     if (!title) {
       return;
     }
 
     setSaveInFlight(true);
     postStatus("info", kind === "autosave" ? "Autosaving working draft..." : "Saving working draft...");
-    await new Promise((resolve) => window.setTimeout(resolve, 650));
-
-    updateTitle(titleId, (entry) => {
-      const timestamp = new Date().toISOString();
-      return {
-        ...entry,
-        savedSnapshot: clonePhrases(entry.phrases),
-        draft: {
-          ...entry.draft,
-          version: entry.draft.version + 1,
-          lastAutosaveAt: kind === "autosave" ? timestamp : entry.draft.lastAutosaveAt,
-          lastSaveAt: kind === "manual" || kind === "checkin" ? timestamp : entry.draft.lastSaveAt,
-          lastSyncAt: kind === "sync" ? timestamp : entry.draft.lastSyncAt,
-          isDirty: false,
-        },
-      };
-    });
-
-    setSaveInFlight(false);
-    postStatus(
-      "success",
-      kind === "autosave"
-        ? "Autosave complete. Draft is persisted on the server."
-        : kind === "sync"
-          ? "Sync complete. Working draft stayed checked out."
-          : kind === "checkin"
-            ? "Final save complete. Ready to check in."
-            : "Save complete. Latest phrase edits are in the working draft.",
-    );
+    try {
+      const response = await api.saveTitle(titleId, kind, {
+        ...title,
+        savedSnapshot: clonePhrases(title.phrases),
+      });
+      applyServerResponse(response);
+      setTextDraftDirty(false);
+      postStatus(
+        "success",
+        kind === "autosave"
+          ? "Autosave complete. Draft is persisted on the server."
+          : kind === "sync"
+            ? "Sync complete. Working draft stayed checked out."
+            : kind === "checkin"
+              ? "Final save complete. Title checked in."
+              : "Save complete. Latest phrase edits are in the working draft.",
+      );
+    } catch (error) {
+      postStatus("error", error instanceof Error ? error.message : "Save failed.");
+    } finally {
+      setSaveInFlight(false);
+    }
   }
 
   function markSelectedPhraseReviewed(message: string) {
@@ -451,45 +640,60 @@ export default function App() {
     return "Checked in (read-only)";
   }
 
-  function login() {
-    const user = appState.users.find((entry) => entry.id === loginSelectionId);
-    if (!user) {
+  async function login() {
+    if (!loginEmail.trim() || !loginPassword.trim()) {
+      postStatus("warning", "Enter an email and password to sign in.");
       return;
     }
 
-    updateState((current) => ({
-      ...current,
-      sessionUserId: user.id,
-      users: current.users.map((entry) =>
-        entry.id === user.id ? { ...entry, lastLoginAt: new Date().toISOString() } : entry,
-      ),
-    }));
-    pushAudit("login", null, user, "Logged in to resume the web editing workspace.");
-    postStatus("success", `Signed in as ${user.displayName}.`);
+    setAuthInFlight(true);
+    try {
+      const response = await api.login(loginEmail.trim(), loginPassword);
+      applyServerResponse(response);
+      postStatus("success", `Signed in as ${response.state.users.find((user) => user.id === response.state.sessionUserId)?.displayName ?? "user"}.`);
+    } catch (error) {
+      postStatus("error", error instanceof Error ? error.message : "Sign in failed.");
+    } finally {
+      setAuthInFlight(false);
+    }
   }
 
-  function logout() {
+  async function logout() {
     if (!currentUser) {
       return;
     }
 
     commitText();
-    updateState((current) => ({ ...current, sessionUserId: null }));
-    setPlaybackState("stopped");
-    setPlayheadTime(null);
-    postStatus("info", "Session ended. Any active checkout stayed on the server.");
+    try {
+      await api.logout();
+    } catch {
+      // Clear the local shell even if the server session is already gone.
+    }
+    resetToLoggedOutState("Session ended. Any active checkout stayed on the server.");
   }
 
   function play(action: PlaybackState) {
-    if (!selectedPhrase) {
+    const audio = audioRef.current;
+    if (!selectedPhrase || !audio || !selectedTitle?.audioUrl) {
+      postStatus("warning", "This title does not have playable working audio yet.");
       return;
     }
 
     if (action === "playing") {
-      setPlayheadTime((current) => current ?? selectedPhrase.start);
+      if (audio.currentTime < selectedPhrase.start || audio.currentTime > selectedPhrase.end) {
+        audio.currentTime = selectedPhrase.start;
+      }
+      audio.playbackRate = playbackSpeed;
+      void audio.play().catch(() => undefined);
+      setPlayheadTime(audio.currentTime || selectedPhrase.start);
       postStatus("info", `Playback ${playbackSpeed.toFixed(2)}x on the selected phrase.`);
     }
+    if (action === "paused") {
+      audio.pause();
+    }
     if (action === "stopped") {
+      audio.pause();
+      audio.currentTime = selectedPhrase.start;
       setPlayheadTime(selectedPhrase.start);
     }
     setPlaybackState(action);
@@ -674,39 +878,27 @@ export default function App() {
     postStatus("success", "Combined the selected adjacent phrases.");
   }
 
-  function checkout(titleId: string) {
+  async function checkout(titleId: string) {
     if (!currentUser) {
       return;
     }
 
-    const target = appState.titles.find((title) => title.id === titleId);
-    const activeCheckout = appState.titles.find((title) => title.checkedOutByUserId === currentUser.id);
-    if (!target) {
-      return;
+    try {
+      const response = await api.checkout(titleId);
+      const title = response.state.titles.find((entry) => entry.id === titleId);
+      applyServerResponse({
+        ...response,
+        state: {
+          ...response.state,
+          currentView: "editor",
+          selectedTitleId: titleId,
+          selectedPhraseIds: title?.phrases[0] ? [title.phrases[0].id] : [],
+        },
+      });
+      postStatus("success", `${title?.title ?? "Title"} is now checked out to you.`);
+    } catch (error) {
+      postStatus("error", error instanceof Error ? error.message : "Checkout failed.");
     }
-    if (target.checkedOutByUserId && target.checkedOutByUserId !== currentUser.id) {
-      postStatus("error", "That title is already checked out by another user.");
-      return;
-    }
-    if (activeCheckout && activeCheckout.id !== target.id) {
-      postStatus("error", "A user can only hold one active checked-out title at a time.");
-      return;
-    }
-
-    updateTitle(titleId, (title) => ({
-      ...title,
-      checkedOutByUserId: currentUser.id,
-      checkedOutAt: new Date().toISOString(),
-      draft: { ...title.draft, status: "active" },
-    }));
-    updateState((current) => ({
-      ...current,
-      selectedTitleId: titleId,
-      selectedPhraseIds: target.phrases[0] ? [target.phrases[0].id] : [],
-      currentView: "editor",
-    }));
-    pushAudit("checkout", target, currentUser, "Checked out title and opened the latest server-side draft.");
-    postStatus("success", `${target.title} is now checked out to you.`);
   }
 
   async function sync(titleId: string) {
@@ -714,15 +906,8 @@ export default function App() {
       return;
     }
 
-    const target = appState.titles.find((title) => title.id === titleId);
-    if (!target || target.checkedOutByUserId !== currentUser.id) {
-      postStatus("error", "Only the current checkout owner can sync this title.");
-      return;
-    }
-
     commitText();
     await saveTitle("sync", titleId);
-    pushAudit("sync", target, currentUser, "Synced working-draft changes while keeping the checkout.");
   }
 
   async function checkIn(titleId: string) {
@@ -738,18 +923,10 @@ export default function App() {
 
     commitText();
     await saveTitle("checkin", titleId);
-    updateTitle(titleId, (title) => ({
-      ...title,
-      checkedOutByUserId: null,
-      checkedOutAt: null,
-      badge: title.phrases.every((phrase) => phrase.reviewed) ? "reviewed" : title.badge,
-      draft: { ...title.draft, status: "finalized" },
-    }));
-    pushAudit("checkin", target, currentUser, "Checked in the latest finalized working draft.");
     postStatus("success", `${target.title} is checked in and available to the library.`);
   }
 
-  function forceCheckIn(titleId: string) {
+  async function forceCheckIn(titleId: string) {
     if (!currentUser || currentUser.role !== "admin") {
       return;
     }
@@ -760,114 +937,129 @@ export default function App() {
       return;
     }
 
-    updateTitle(titleId, (title) => ({
-      ...title,
-      checkedOutByUserId: null,
-      checkedOutAt: null,
-      draft: { ...title.draft, status: "finalized", isDirty: false },
-    }));
-    pushAudit("force_checkin", target, currentUser, "Admin forced a check-in using the latest stored copy.");
-    postStatus("warning", `${target.title} was force checked in by admin.`);
+    try {
+      const response = await api.forceCheckIn(titleId);
+      applyServerResponse(response);
+      postStatus("warning", `${target.title} was force checked in by admin.`);
+    } catch (error) {
+      postStatus("error", error instanceof Error ? error.message : "Force check-in failed.");
+    }
   }
 
-  function takeOver(titleId: string) {
+  async function takeOver(titleId: string) {
     if (!currentUser || currentUser.role !== "admin") {
       return;
     }
 
     const target = appState.titles.find((title) => title.id === titleId);
-    const activeCheckout = appState.titles.find((title) => title.checkedOutByUserId === currentUser.id);
     if (!target) {
       return;
     }
-    if (activeCheckout && activeCheckout.id !== titleId) {
-      postStatus("error", "Admin can still hold only one active checked-out title at a time.");
-      return;
-    }
 
-    updateTitle(titleId, (title) => ({
-      ...title,
-      checkedOutByUserId: currentUser.id,
-      checkedOutAt: new Date().toISOString(),
-      draft: { ...title.draft, status: "active" },
-    }));
-    pushAudit("takeover", target, currentUser, "Admin took over the checkout and preserved the stored draft.");
-    postStatus("warning", `${target.title} is now checked out to ${currentUser.displayName}.`);
+    try {
+      const response = await api.takeOver(titleId);
+      const nextTitle = response.state.titles.find((entry) => entry.id === titleId);
+      applyServerResponse({
+        ...response,
+        state: {
+          ...response.state,
+          currentView: "editor",
+          selectedTitleId: titleId,
+          selectedPhraseIds: nextTitle?.phrases[0] ? [nextTitle.phrases[0].id] : [],
+        },
+      });
+      postStatus("warning", `${target.title} is now checked out to ${currentUser.displayName}.`);
+    } catch (error) {
+      postStatus("error", error instanceof Error ? error.message : "Take over failed.");
+    }
   }
 
-  function createImportedTitle(sourceType: TitleRecord["sourceType"]) {
+  async function submitYouTubeImport() {
     if (!currentUser) {
       return;
     }
 
-    const activeCheckout = appState.titles.find((title) => title.checkedOutByUserId === currentUser.id);
-    if (activeCheckout) {
-      postStatus("error", "Check in your current title before importing a new active draft.");
+    if (!appState.youtubeUrl.trim()) {
+      postStatus("warning", "Enter a YouTube URL before starting the import.");
       return;
     }
 
-    const createdAt = new Date().toISOString();
-    const firstPhrase: Phrase = {
-      id: makeId("phrase"),
-      start: 0,
-      end: 2.4,
-      text: sourceType === "youtube" ? "Imported subtitle phrase from YouTube." : "Imported subtitle phrase from media.",
-      enabled: true,
-      reviewed: false,
-    };
-    const title: TitleRecord = {
-      id: makeId("title"),
-      videoId: sourceType === "youtube" ? `yt-${Date.now().toString(36)}` : `local-${Date.now().toString(36)}`,
-      title: sourceType === "youtube" ? "Imported YouTube Title" : sourceType === "package" ? "Imported .asr Package" : "Imported Media Title",
-      source: sourceType === "youtube" ? "YouTube URL" : sourceType === "package" ? ".asr package" : "Local Media",
-      language: appState.importLanguage,
-      duration: sourceType === "youtube" ? 7.8 : 6.6,
-      sourceType,
-      uploadedAt: createdAt,
-      sizeLabel: sourceType === "youtube" ? "12.5 MB" : "16.8 MB",
-      checkedOutByUserId: currentUser.id,
-      checkedOutAt: createdAt,
-      phrases: [firstPhrase],
-      savedSnapshot: clonePhrases([firstPhrase]),
-      draft: {
-        version: 1,
-        lastAutosaveAt: createdAt,
-        lastSaveAt: createdAt,
-        lastSyncAt: createdAt,
-        isDirty: false,
-        status: "active",
-      },
-      badge: "downloaded",
-    };
-
-    updateState((current) => ({
-      ...current,
-      titles: [title, ...current.titles],
-      selectedTitleId: title.id,
-      selectedPhraseIds: [firstPhrase.id],
-      currentView: "editor",
-    }));
-    pushAudit(
-      sourceType === "youtube" ? "title_import" : "title_upload",
-      title,
-      currentUser,
-      sourceType === "youtube"
-        ? `Imported YouTube title from ${appState.youtubeUrl || "a queued URL"}.`
-        : sourceType === "package"
-          ? "Imported a compatible .asr archive into the shared library."
-          : "Uploaded local media and created a new editable draft.",
-    );
-    postStatus(
-      "success",
-      sourceType === "youtube"
-        ? "YouTube import queued and opened as a checked-out working draft."
-        : sourceType === "package"
-          ? "Imported .asr package and opened it as your active draft."
-          : "Local media imported and opened as your active editable title.",
-    );
+    try {
+      const response = await api.queueYouTubeImport(appState.youtubeUrl.trim(), appState.importLanguage);
+      setJobs((current) => [response.job, ...current].slice(0, 30));
+      updateState((current) => ({ ...current, currentView: "shared" }));
+      postStatus("info", "YouTube import queued on the server.");
+    } catch (error) {
+      postStatus("error", error instanceof Error ? error.message : "Could not queue the YouTube import.");
+    }
   }
 
-  function deleteTitle(titleId: string) {
+  function createImportedTitle(sourceType: TitleRecord["sourceType"]) {
+    if (sourceType === "youtube") {
+      void submitYouTubeImport();
+      return;
+    }
+
+    if (sourceType === "package") {
+      asrImportInputRef.current?.click();
+      return;
+    }
+
+    updateState((current) => ({ ...current, currentView: "shared" }));
+    postStatus("info", "Choose a media file and optional subtitle file in the upload form.");
+  }
+
+  async function submitMediaImport() {
+    if (!mediaFile) {
+      postStatus("warning", "Select a media file before uploading.");
+      return;
+    }
+
+    const formData = new FormData();
+    formData.append("media", mediaFile);
+    if (subtitleFile) {
+      formData.append("subtitle", subtitleFile);
+    }
+    formData.append("title", mediaTitle.trim() || mediaFile.name.replace(/\.[^.]+$/, ""));
+    formData.append("source", mediaSource.trim() || "Uploaded Media");
+    formData.append("language", mediaLanguage);
+
+    try {
+      const response = await api.queueMediaImport(formData);
+      setJobs((current) => [response.job, ...current].slice(0, 30));
+      setMediaFile(null);
+      setSubtitleFile(null);
+      setMediaTitle("");
+      setMediaSource("");
+      setMediaLanguage(appState.importLanguage);
+      postStatus("info", "Media import queued on the server.");
+    } catch (error) {
+      postStatus("error", error instanceof Error ? error.message : "Media import failed to queue.");
+    }
+  }
+
+  async function handleAsrImportChange(event: ChangeEvent<HTMLInputElement>) {
+    const file = event.target.files?.[0];
+    if (!file) {
+      return;
+    }
+
+    const formData = new FormData();
+    formData.append("archive", file);
+
+    try {
+      const response = await api.queueAsrImport(formData);
+      setJobs((current) => [response.job, ...current].slice(0, 30));
+      updateState((current) => ({ ...current, currentView: "shared" }));
+      postStatus("info", ".asr archive queued for import on the server.");
+    } catch (error) {
+      postStatus("error", error instanceof Error ? error.message : ".asr import failed to queue.");
+    } finally {
+      event.target.value = "";
+    }
+  }
+
+  async function deleteTitle(titleId: string) {
     if (!currentUser || currentUser.role !== "admin") {
       return;
     }
@@ -877,18 +1069,13 @@ export default function App() {
       return;
     }
 
-    updateState((current) => {
-      const titles = current.titles.filter((title) => title.id !== titleId);
-      const nextTitle = titles[0];
-      return {
-        ...current,
-        titles,
-        selectedTitleId: nextTitle?.id ?? "",
-        selectedPhraseIds: nextTitle?.phrases[0] ? [nextTitle.phrases[0].id] : [],
-      };
-    });
-    pushAudit("title_delete", target, currentUser, "Removed the title from the shared cloud library.");
-    postStatus("warning", `${target.title} was deleted from the library.`);
+    try {
+      const response = await api.deleteTitle(titleId);
+      applyServerResponse(response);
+      postStatus("warning", `${target.title} was deleted from the library.`);
+    } catch (error) {
+      postStatus("error", error instanceof Error ? error.message : "Delete failed.");
+    }
   }
 
   function handleExport(kind: "current" | "all" | "pack" | "import") {
@@ -896,35 +1083,51 @@ export default function App() {
       return;
     }
     if (kind === "import") {
-      createImportedTitle("package");
+      asrImportInputRef.current?.click();
       return;
     }
-    pushAudit(
-      "export",
-      selectedTitle,
-      currentUser,
-      kind === "current"
-        ? `Prepared export for ${selectedTitle?.title ?? "the selected title"}.`
-        : kind === "all"
-          ? "Prepared export for all eligible checked-in or reviewed titles."
-          : "Packed the selected library set into a compatible .asr archive.",
-    );
+
+    if (kind === "all") {
+      window.location.href = "/api/export/all";
+      postStatus("success", "Preparing export bundle from the server.");
+      return;
+    }
+
+    if (!selectedTitle) {
+      postStatus("warning", "Select a title before exporting.");
+      return;
+    }
+
+    window.location.href = `/api/titles/${selectedTitle.id}/export.asr`;
     postStatus(
       "success",
       kind === "current"
-        ? "Export Current prepared the active title package."
-        : kind === "all"
-          ? "Export All prepared the eligible dataset set."
-          : "Pack .asr prepared a desktop-compatible archive package.",
+        ? "Preparing the current title export on the server."
+        : "Packing the current title into a compatible .asr archive.",
     );
   }
 
-  function probeLanguages() {
-    postStatus("info", "Available subtitle languages found: en, es, fr.");
+  async function probeLanguages() {
+    if (!appState.youtubeUrl.trim()) {
+      postStatus("warning", "Enter a YouTube URL before probing for languages.");
+      return;
+    }
+
+    try {
+      const response = await api.probeLanguages(appState.youtubeUrl.trim());
+      postStatus(
+        "info",
+        response.languages.length > 0
+          ? `Available subtitle languages: ${response.languages.join(", ")}.`
+          : "No subtitle languages were reported for that YouTube title.",
+      );
+    } catch (error) {
+      postStatus("error", error instanceof Error ? error.message : "Language probe failed.");
+    }
   }
 
   function reloadLibrary() {
-    postStatus("info", "Library metadata refreshed. Titles and draft locks are up to date.");
+    void refreshState(true);
   }
 
   function updateStorage(field: keyof PersistedState["storage"], value: string | boolean) {
@@ -934,15 +1137,38 @@ export default function App() {
     }));
   }
 
-  function testStorage() {
+  async function saveStorageConfig() {
     if (!currentUser || currentUser.role !== "admin") {
       return;
     }
-    updateState((current) => ({
-      ...current,
-      storage: { ...current.storage, lastConnectionTestAt: new Date().toISOString() },
-    }));
-    postStatus("success", "Storage connection test passed from the server-side configuration.");
+
+    try {
+      const response = await api.saveStorage(
+        appState.storage,
+        storageAccessKeyId.trim() ? storageAccessKeyId.trim() : undefined,
+        storageSecretAccessKey.trim() ? storageSecretAccessKey.trim() : undefined,
+      );
+      updateState((current) => ({ ...current, storage: response.storage }));
+      setStorageAccessKeyId("");
+      setStorageSecretAccessKey("");
+      postStatus("success", "Storage configuration saved on the server.");
+    } catch (error) {
+      postStatus("error", error instanceof Error ? error.message : "Could not save storage settings.");
+    }
+  }
+
+  async function testStorage() {
+    if (!currentUser || currentUser.role !== "admin") {
+      return;
+    }
+
+    try {
+      const response = await api.testStorage();
+      updateState((current) => ({ ...current, storage: response.storage }));
+      postStatus("success", "Storage connection test passed from the server-side configuration.");
+    } catch (error) {
+      postStatus("error", error instanceof Error ? error.message : "Storage connection test failed.");
+    }
   }
 
   const selectedTitleState = selectedTitle ? getTitleStateLabel(selectedTitle) : "No title";
@@ -957,6 +1183,18 @@ export default function App() {
   const playheadX =
     playheadTime !== null && selectedTitle ? ((playheadTime - visibleStart) / viewRange) * waveformWidth : null;
 
+  if (loadingState) {
+    return (
+      <main className="login-shell">
+        <section className="login-panel">
+          <div className="eyebrow">yt-asr Web GUI</div>
+          <h1>Connecting to the hosted workspace.</h1>
+          <p className="lede">Checking the server session, title library, and background job queue.</p>
+        </section>
+      </main>
+    );
+  }
+
   if (!currentUser) {
     return (
       <main className="login-shell">
@@ -964,22 +1202,25 @@ export default function App() {
           <div className="eyebrow">yt-asr Web GUI</div>
           <h1>Sign in to resume your checked-out title.</h1>
           <p className="lede">
-            This prototype turns the desktop workflow in <code>web_requirements.md</code> into a browser-first UI:
-            authenticated access, one active checkout per user, draft resume, and a responsive three-pane editor.
+            This app now signs into the real server workspace: authenticated sessions, durable drafts, background imports,
+            and server-enforced checkout rules.
           </p>
 
           <div className="account-grid">
-            {appState.users.map((user) => (
+            {DEV_ACCOUNTS.map((account) => (
               <button
-                key={user.id}
-                className={`account-card ${loginSelectionId === user.id ? "selected" : ""}`}
-                onClick={() => setLoginSelectionId(user.id)}
+                key={account.email}
+                className={`account-card ${loginEmail === account.email ? "selected" : ""}`}
+                onClick={() => {
+                  setLoginEmail(account.email);
+                  setLoginPassword(account.password);
+                }}
                 type="button"
               >
-                <span className="account-role">{user.role}</span>
-                <strong>{user.displayName}</strong>
-                <span>{user.email}</span>
-                <span>Last login: {formatTimestamp(user.lastLoginAt)}</span>
+                <span className="account-role">Seeded Account</span>
+                <strong>{account.label}</strong>
+                <span>{account.email}</span>
+                <span>Password: {account.password}</span>
               </button>
             ))}
           </div>
@@ -987,14 +1228,23 @@ export default function App() {
           <div className="login-actions">
             <label className="field">
               <span>Email</span>
-              <input readOnly value={appState.users.find((user) => user.id === loginSelectionId)?.email ?? ""} />
+              <input value={loginEmail} onChange={(event) => setLoginEmail(event.target.value)} />
             </label>
             <label className="field">
               <span>Password</span>
-              <input readOnly type="password" value="demo-password" />
+              <input
+                type="password"
+                value={loginPassword}
+                onChange={(event) => setLoginPassword(event.target.value)}
+                onKeyDown={(event) => {
+                  if (event.key === "Enter") {
+                    void login();
+                  }
+                }}
+              />
             </label>
-            <button className="primary-button" onClick={login} type="button">
-              Sign In
+            <button className="primary-button" onClick={() => void login()} type="button" disabled={authInFlight}>
+              {authInFlight ? "Signing In..." : "Sign In"}
             </button>
           </div>
         </section>
@@ -1011,10 +1261,10 @@ export default function App() {
           </div>
           <div className="spec-card ghost">
             <span className="eyebrow">Working Drafts</span>
-            <h2>Draft state persists across refresh and logout in this GUI prototype.</h2>
+            <h2>Draft state persists across refresh and logout on the server.</h2>
             <p>
-              Logging out ends the browser session only. The active checkout and latest persisted draft remain available
-              so the next sign-in can reopen the title immediately.
+              Logging out ends the browser session only. The active checkout and latest persisted draft remain available so
+              the next sign-in can reopen the title immediately.
             </p>
           </div>
         </section>
@@ -1123,11 +1373,13 @@ export default function App() {
         <div className="user-chip">
           <span>{currentUser.displayName}</span>
           <small>{currentUser.role}</small>
-          <button className="toolbar-button" onClick={logout} type="button">
+          <button className="toolbar-button" onClick={() => void logout()} type="button">
             Logout
           </button>
         </div>
       </header>
+
+      <input ref={asrImportInputRef} type="file" accept=".asr,.zip" hidden onChange={handleAsrImportChange} />
 
       {appState.currentView === "editor" && selectedTitle ? (
         <section className="workspace-grid">
@@ -1245,6 +1497,17 @@ export default function App() {
                       <stop offset="100%" stopColor="#ffb86f" />
                     </linearGradient>
                   </defs>
+                  {selectedTitle.waveformUrl ? (
+                    <image
+                      href={selectedTitle.waveformUrl}
+                      x="0"
+                      y="0"
+                      width={waveformWidth}
+                      height={waveformHeight}
+                      preserveAspectRatio="none"
+                      opacity="0.42"
+                    />
+                  ) : null}
                   <rect x="0" y="0" width={waveformWidth} height={waveformHeight} rx="18" />
                   <polyline points={wavePoints} fill="none" stroke="url(#wave-gradient)" strokeWidth="2.5" />
                   {selectedPhrase ? (
@@ -1499,6 +1762,54 @@ export default function App() {
             </div>
           </div>
 
+          <section className="card form-card">
+            <div className="card-header">
+              <div>
+                <span className="eyebrow">Import Media</span>
+                <h3>Upload Local Media or Subtitle Pair</h3>
+              </div>
+              <button className="toolbar-button primary" onClick={() => void submitMediaImport()} type="button">
+                Queue Upload
+              </button>
+            </div>
+            <div className="settings-form">
+              <label className="field">
+                <span>Title</span>
+                <input value={mediaTitle} onChange={(event) => setMediaTitle(event.target.value)} placeholder="Imported Media Title" />
+              </label>
+              <label className="field">
+                <span>Source / Channel</span>
+                <input value={mediaSource} onChange={(event) => setMediaSource(event.target.value)} placeholder="Uploaded Media" />
+              </label>
+              <label className="field">
+                <span>Language</span>
+                <select value={mediaLanguage} onChange={(event) => setMediaLanguage(event.target.value)}>
+                  {LANGUAGES.map((language) => (
+                    <option key={language} value={language}>
+                      {language}
+                    </option>
+                  ))}
+                </select>
+              </label>
+              <label className="field">
+                <span>Media File</span>
+                <input
+                  type="file"
+                  accept="audio/*,video/*"
+                  onChange={(event) => setMediaFile(event.target.files?.[0] ?? null)}
+                />
+              </label>
+              <label className="field">
+                <span>Subtitle File (optional)</span>
+                <input
+                  type="file"
+                  accept=".srt,.vtt,.json,.json3,.srv3"
+                  onChange={(event) => setSubtitleFile(event.target.files?.[0] ?? null)}
+                />
+              </label>
+            </div>
+          </section>
+
           <div className="shared-table">
             <div className="shared-head">
               <span>Title / Video ID</span>
@@ -1549,6 +1860,28 @@ export default function App() {
             <section className="card">
               <div className="card-header">
                 <div>
+                  <span className="eyebrow">Background Jobs</span>
+                  <h3>Import Queue</h3>
+                </div>
+              </div>
+              <div className="audit-list">
+                {jobs.length === 0 ? <p className="helper-text">No queued or recent jobs yet.</p> : null}
+                {jobs.map((job) => (
+                  <article className="audit-item" key={job.id}>
+                    <div className="audit-top">
+                      <strong>{job.type.replaceAll("_", " ")}</strong>
+                      <span>{job.progress}%</span>
+                    </div>
+                    <span>{job.status}</span>
+                    <p>{job.error || job.message || "Waiting for server worker."}</p>
+                  </article>
+                ))}
+              </div>
+            </section>
+
+            <section className="card">
+              <div className="card-header">
+                <div>
                   <span className="eyebrow">Audit Trail</span>
                   <h3>Recent Events</h3>
                 </div>
@@ -1593,9 +1926,14 @@ export default function App() {
               <span className="eyebrow">Admin Settings</span>
               <h2>Storage Configuration</h2>
             </div>
-            <button className="toolbar-button primary" onClick={testStorage} type="button">
-              Test Connection
-            </button>
+            <div className="button-row">
+              <button className="toolbar-button" onClick={() => void saveStorageConfig()} type="button">
+                Save Settings
+              </button>
+              <button className="toolbar-button primary" onClick={() => void testStorage()} type="button">
+                Test Connection
+              </button>
+            </div>
           </div>
 
           <div className="settings-grid">
@@ -1613,7 +1951,7 @@ export default function App() {
                     value={appState.storage.provider}
                     onChange={(event) => updateStorage("provider", event.target.value as StorageProvider)}
                   >
-                    {["Backblaze B2", "Amazon S3", "Cloudflare R2", "MinIO"].map((provider) => (
+                    {["Local Disk", "Backblaze B2", "Amazon S3", "Cloudflare R2", "MinIO"].map((provider) => (
                       <option key={provider} value={provider}>
                         {provider}
                       </option>
@@ -1656,6 +1994,23 @@ export default function App() {
                     onChange={(event) => updateStorage("auditVisible", event.target.checked)}
                   />
                   <span>Audit visibility enabled</span>
+                </label>
+                <label className="field">
+                  <span>Access key ID</span>
+                  <input
+                    value={storageAccessKeyId}
+                    onChange={(event) => setStorageAccessKeyId(event.target.value)}
+                    placeholder="Leave blank to keep current server secret"
+                  />
+                </label>
+                <label className="field">
+                  <span>Secret access key</span>
+                  <input
+                    type="password"
+                    value={storageSecretAccessKey}
+                    onChange={(event) => setStorageSecretAccessKey(event.target.value)}
+                    placeholder="Leave blank to keep current server secret"
+                  />
                 </label>
               </div>
             </section>

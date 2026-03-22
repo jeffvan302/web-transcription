@@ -1,84 +1,129 @@
 # Web Transcription
 
-This repository contains the browser-based `yt-asr` GUI prototype derived from `web_requirements.md`.
+This repository now contains a real full-stack baseline for the `yt-asr` web rewrite:
+
+- React/Vite frontend
+- Express backend API
+- SQLite persistence for users, sessions, titles, drafts, audits, and jobs
+- Server-managed file/object storage abstraction
+- Background import jobs for YouTube, local media, and `.asr` packages
+- Real audio extraction and waveform generation with `ffmpeg`
+- Optional transcription through OpenAI or local Whisper
+
+## Important Deployment Note
+
+GitHub Pages can only host the static frontend build. It cannot host:
+
+- authentication
+- sessions
+- the API
+- background jobs
+- file uploads
+- server-side storage access
+- media processing
+
+That means GitHub Pages is useful only as a static preview. The real application needs a server runtime such as Railway.
 
 ## Local Development
 
+1. Copy the environment template if you want custom settings:
+
+```powershell
+Copy-Item .env.example .env
+```
+
+2. Install dependencies:
+
 ```powershell
 npm install
+```
+
+3. Run the frontend and backend together:
+
+```powershell
 npm run dev
 ```
 
-## Deployment Shape
+Frontend runs on `http://localhost:4173` and proxies API requests to the backend on `http://localhost:3001`.
 
-The GitHub Actions workflow in `.github/workflows/deploy-apprunner.yml` deploys this app to AWS App Runner using a container image:
+## Seeded Accounts
 
-1. Build the app with Docker
-2. Push the image to Amazon ECR
-3. Create the App Runner service if it does not exist
-4. Update the App Runner service if it already exists
+The database seeds these development users on first startup:
 
-The container serves the built Vite app through Nginx with SPA fallback routing.
+- `maya@yt-asr.local` / `maya1234`
+- `jordan@yt-asr.local` / `jordan1234`
+- `theo@yt-asr.local` / `admin1234`
 
-## GitHub Repository Setup
+## What Works
 
-If GitHub CLI is installed and authenticated:
+- real email/password login with server sessions
+- server-enforced checkout and check-in rules
+- server-persisted working drafts
+- local media upload
+- `.asr` archive import
+- YouTube import job queue using `yt-dlp`
+- working-audio extraction with `ffmpeg`
+- waveform image generation with `ffmpeg`
+- export current title as `.asr`
+- export all titles as a zip bundle of `.asr` files
+- admin storage configuration and connection testing
 
-```powershell
-winget install GitHub.cli
-gh auth login
-.\scripts\publish-github.ps1 -GitHubOwner <your-github-user-or-org> -RepositoryName web-transcription -Visibility private
-```
+If transcription is unavailable, imports still succeed and create titles that can be edited manually.
 
-If you prefer, create the repository manually on GitHub, then run:
+## Optional Transcription Backends
 
-```powershell
-git init -b main
-git add .
-git commit -m "Initial commit"
-git remote add origin https://github.com/<owner>/<repo>.git
-git push -u origin main
-```
+You can enable either of these:
 
-## AWS Bootstrap
-
-Before the GitHub Action can deploy, make sure your local AWS CLI can authenticate:
+1. OpenAI Audio Transcription
 
 ```powershell
-aws configure sso
-aws sso login
-aws sts get-caller-identity
+$env:OPENAI_API_KEY = "<your-key>"
 ```
 
-Then bootstrap the AWS-side roles needed by GitHub Actions and App Runner:
+2. Local Whisper via FFmpeg
 
 ```powershell
-.\scripts\bootstrap-aws-apprunner.ps1 -GitHubOwner <owner> -GitHubRepo <repo> -AwsRegion us-east-1 -AwsProfile <your-sso-profile>
+$env:WHISPER_MODEL_PATH = "C:\\path\\to\\ggml-base.en.bin"
 ```
 
-That script creates or updates:
+If neither backend is available, uploaded/imported titles without subtitles are created with zero phrases so you can transcribe manually.
 
-- The GitHub Actions OIDC provider in IAM
-- A deployment role that GitHub Actions can assume
-- An App Runner ECR access role for pulling private ECR images
+## Railway Deployment
 
-## GitHub Repository Settings
+This repo is now set up for Railway with the included [`railway.json`](/C:/Users/TheunisvanNiekerk/Code/Web_Transcription/railway.json), Docker build, and `/api/health` endpoint.
 
-After running the bootstrap script, add these repository settings in GitHub:
+Recommended setup:
 
-Secret:
+1. Create a Railway project from this GitHub repository.
+2. Keep the default Dockerfile-based deployment.
+3. Add a Railway Volume and mount it at `/app/data`.
+4. Set `APP_BASE_URL` to your Railway public domain.
+5. Optionally set `OPENAI_API_KEY` if you want automatic transcription.
 
-- `AWS_ROLE_ARN`
+Important notes:
 
-Variables:
+- The app stores SQLite data, uploads, generated waveforms, and local object storage under `data/`, so a persistent volume is required for a real deployment.
+- If you want to mount your volume somewhere else, set `APP_DATA_DIR` to the mounted path.
+- Start with the admin storage provider set to `Local Disk` so uploaded assets stay on the mounted volume.
+- Railway Buckets can be wired later through the admin storage settings because the backend supports S3-compatible object storage.
+- Leave Railway Serverless disabled for this service for now. Background import/transcription jobs run inside the web process, so sleeping the service can interrupt long-running jobs.
 
-- `AWS_REGION`
-- `ECR_REPOSITORY`
-- `APP_RUNNER_SERVICE_NAME`
-- `APP_RUNNER_ECR_ACCESS_ROLE_ARN`
-- `APP_RUNNER_PORT` = `3000`
-- `APP_RUNNER_SERVICE_ARN` (optional, leave blank for the first deploy)
+## Smoke Test
 
-## Deploy
+This repo includes a small end-to-end smoke test that:
 
-Push to `main` or trigger the `Deploy To App Runner` workflow manually.
+- starts the server
+- signs in
+- uploads a generated audio file
+- waits for the background import
+- confirms that a title, audio artifact, and waveform artifact were created
+
+Run it with:
+
+```powershell
+node .\scripts\smoke-test.mjs --start-server
+```
+
+## Container Runtime
+
+The included [`Dockerfile`](/C:/Users/TheunisvanNiekerk/Code/Web_Transcription/Dockerfile) builds the frontend and runs the Node server on port `3000`, which is suitable for Railway-style deployment.
