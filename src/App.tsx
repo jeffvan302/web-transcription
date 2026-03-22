@@ -185,6 +185,40 @@ function waitForAudioMetadata(audio: HTMLAudioElement) {
   });
 }
 
+function waitForAudioCanPlay(audio: HTMLAudioElement) {
+  if (audio.readyState >= 3 && !audio.seeking) {
+    return Promise.resolve();
+  }
+
+  return new Promise<void>((resolve, reject) => {
+    let timeoutId = 0;
+
+    const cleanup = () => {
+      window.clearTimeout(timeoutId);
+      audio.removeEventListener("canplay", handleCanPlay);
+      audio.removeEventListener("error", handleError);
+    };
+
+    const handleCanPlay = () => {
+      cleanup();
+      resolve();
+    };
+
+    const handleError = () => {
+      cleanup();
+      reject(new Error("Audio data could not be buffered for playback."));
+    };
+
+    timeoutId = window.setTimeout(() => {
+      cleanup();
+      reject(new Error("Audio seek timed out before playback could begin."));
+    }, 12000);
+
+    audio.addEventListener("canplay", handleCanPlay);
+    audio.addEventListener("error", handleError);
+  });
+}
+
 function seekAudio(audio: HTMLAudioElement, time: number) {
   const duration = Number.isFinite(audio.duration) && audio.duration > 0 ? audio.duration : null;
   const target = clamp(time, 0, duration ?? time);
@@ -192,12 +226,13 @@ function seekAudio(audio: HTMLAudioElement, time: number) {
     return Promise.resolve(target);
   }
 
-  return new Promise<number>((resolve) => {
+  return new Promise<number>((resolve, reject) => {
     let timeoutId = 0;
 
     const cleanup = () => {
       window.clearTimeout(timeoutId);
       audio.removeEventListener("seeked", handleSeeked);
+      audio.removeEventListener("error", handleError);
     };
 
     const handleSeeked = () => {
@@ -205,18 +240,24 @@ function seekAudio(audio: HTMLAudioElement, time: number) {
       resolve(audio.currentTime);
     };
 
+    const handleError = () => {
+      cleanup();
+      reject(new Error("Audio seek failed."));
+    };
+
     timeoutId = window.setTimeout(() => {
       cleanup();
-      resolve(audio.currentTime);
-    }, 1200);
+      reject(new Error("Audio seek timed out."));
+    }, 12000);
 
     audio.addEventListener("seeked", handleSeeked);
+    audio.addEventListener("error", handleError);
 
     try {
       audio.currentTime = target;
     } catch {
       cleanup();
-      resolve(audio.currentTime);
+      reject(new Error("Audio seek could not be applied."));
     }
   });
 }
@@ -1218,6 +1259,7 @@ export default function App() {
       try {
         await waitForAudioMetadata(audio);
         const actualStart = await seekAudio(audio, selectedPhrase.start);
+        await waitForAudioCanPlay(audio);
         audio.playbackRate = playbackSpeed;
         playbackCommandRef.current = null;
         setPlayheadTime(actualStart);

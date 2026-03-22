@@ -59,6 +59,53 @@ const upload = multer({
   },
 });
 
+function parseByteRange(rangeHeader, size) {
+  if (!rangeHeader || !String(rangeHeader).startsWith("bytes=")) {
+    return null;
+  }
+
+  const firstRange = String(rangeHeader).replace("bytes=", "").split(",")[0];
+  const [startRaw, endRaw] = firstRange.split("-");
+
+  let start = startRaw ? Number(startRaw) : NaN;
+  let end = endRaw ? Number(endRaw) : NaN;
+
+  if (!startRaw) {
+    const suffixLength = Number(endRaw);
+    if (!Number.isFinite(suffixLength) || suffixLength <= 0) {
+      return "invalid";
+    }
+    start = Math.max(0, size - suffixLength);
+    end = size - 1;
+  } else {
+    if (!Number.isFinite(start) || start < 0 || start >= size) {
+      return "invalid";
+    }
+    end = endRaw ? Number(endRaw) : size - 1;
+    if (!Number.isFinite(end) || end < start) {
+      return "invalid";
+    }
+    end = Math.min(end, size - 1);
+  }
+
+  return { start, end };
+}
+
+function applyAudioHeaders(res, size, range = null) {
+  res.setHeader("Accept-Ranges", "bytes");
+  res.setHeader("Content-Type", "audio/wav");
+  res.setHeader("Cache-Control", "private, max-age=0, must-revalidate");
+
+  if (range) {
+    res.status(206);
+    res.setHeader("Content-Range", `bytes ${range.start}-${range.end}/${size}`);
+    res.setHeader("Content-Length", String(range.end - range.start + 1));
+    return;
+  }
+
+  res.setHeader("Content-Length", String(size));
+}
+
 const mediaProbeDir = path.join(paths.inboxDir, "media-probes");
 ensureDir(mediaProbeDir);
 
@@ -1062,12 +1109,29 @@ app.get("/api/titles/:titleId/audio", requireUser, async (req, res, next) => {
 
     const storage = getStorageService();
     if (storage.mode === "local") {
-      res.sendFile(storage.resolveLocalPath(titleRow.audio_object_key));
+      const audioPath = storage.resolveLocalPath(titleRow.audio_object_key);
+      const stat = await fs.promises.stat(audioPath);
+      const range = parseByteRange(req.headers.range, stat.size);
+
+      if (range === "invalid") {
+        res.status(416).setHeader("Content-Range", `bytes */${stat.size}`).end();
+        return;
+      }
+
+      applyAudioHeaders(res, stat.size, range);
+      fs.createReadStream(audioPath, range ? { start: range.start, end: range.end } : undefined).pipe(res);
       return;
     }
 
     const buffer = await storage.getBuffer(titleRow.audio_object_key);
-    res.type("audio/wav").send(buffer);
+    const range = parseByteRange(req.headers.range, buffer.length);
+    if (range === "invalid") {
+      res.status(416).setHeader("Content-Range", `bytes */${buffer.length}`).end();
+      return;
+    }
+
+    applyAudioHeaders(res, buffer.length, range);
+    res.send(range ? buffer.subarray(range.start, range.end + 1) : buffer);
   } catch (error) {
     next(error);
   }
