@@ -46,27 +46,36 @@ npm run dev
 
 Frontend runs on `http://localhost:4173` and proxies API requests to the backend on `http://localhost:3001`.
 
-## Seeded Accounts
+## Development Accounts
 
-The database seeds these development users on first startup:
+In non-production mode, the database seeds these development users on first startup:
 
 - `maya@yt-asr.local` / `maya1234`
 - `jordan@yt-asr.local` / `jordan1234`
 - `theo@yt-asr.local` / `admin1234`
 
+In production, no default users are created unless you explicitly bootstrap one through environment variables such as:
+
+- `BOOTSTRAP_ADMIN_EMAIL`
+- `BOOTSTRAP_ADMIN_PASSWORD`
+- `BOOTSTRAP_ADMIN_DISPLAY_NAME`
+
 ## What Works
 
 - real email/password login with server sessions
+- user administration, admin password reset, and self-service password change
 - server-enforced checkout and check-in rules
-- server-persisted working drafts
+- server-persisted working drafts with immediate save on important edit commits
 - local media upload
+- embedded subtitle track detection for uploaded media
 - `.asr` archive import
-- YouTube import job queue using `yt-dlp`
+- batch YouTube import job queue using `yt-dlp`
 - working-audio extraction with `ffmpeg`
 - waveform image generation with `ffmpeg`
 - export current title as `.asr`
 - export all titles as a zip bundle of `.asr` files
 - admin storage configuration and connection testing
+- interrupted background job recovery on process restart
 
 If transcription is unavailable, imports still succeed and create titles that can be edited manually.
 
@@ -104,8 +113,8 @@ Important notes:
 
 - The app stores SQLite data, uploads, generated waveforms, and local object storage under `data/`, so a persistent volume is required for a real deployment.
 - If you want to mount your volume somewhere else, set `APP_DATA_DIR` to the mounted path.
-- Start with the admin storage provider set to `Local Disk` so uploaded assets stay on the mounted volume.
-- Railway Buckets can be wired later through the admin storage settings because the backend supports S3-compatible object storage.
+- You can keep the admin storage provider on `Local Disk`, or preconfigure a hosted S3-compatible target at boot with `STORAGE_PROVIDER`, `STORAGE_BUCKET`, `STORAGE_PREFIX`, `STORAGE_ENDPOINT_URL`, `STORAGE_REGION`, `STORAGE_ADDRESSING_MODE`, `STORAGE_ACCESS_KEY_ID`, and `STORAGE_SECRET_ACCESS_KEY`.
+- Railway Buckets or any S3-compatible provider can be wired through the admin storage settings because the backend supports S3-compatible object storage.
 - Leave Railway Serverless disabled for this service for now. Background import/transcription jobs run inside the web process, so sleeping the service can interrupt long-running jobs.
 
 ## Smoke Test

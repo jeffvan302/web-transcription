@@ -17,6 +17,7 @@ db.exec(`
     password_hash TEXT NOT NULL,
     role TEXT NOT NULL,
     status TEXT NOT NULL DEFAULT 'active',
+    must_change_password INTEGER NOT NULL DEFAULT 0,
     created_at TEXT NOT NULL,
     updated_at TEXT NOT NULL,
     last_login_at TEXT
@@ -132,9 +133,19 @@ db.exec(`
   );
 `);
 
+function ensureColumn(tableName, columnName, columnSql) {
+  const columns = db.prepare(`PRAGMA table_info(${tableName})`).all();
+  if (columns.some((column) => column.name === columnName)) {
+    return;
+  }
+  db.prepare(`ALTER TABLE ${tableName} ADD COLUMN ${columnName} ${columnSql}`).run();
+}
+
+ensureColumn("users", "must_change_password", "INTEGER NOT NULL DEFAULT 0");
+
 const insertUserStatement = db.prepare(`
-  INSERT INTO users (id, email, display_name, password_hash, role, status, created_at, updated_at)
-  VALUES (@id, @email, @displayName, @passwordHash, @role, 'active', @createdAt, @updatedAt)
+  INSERT INTO users (id, email, display_name, password_hash, role, status, must_change_password, created_at, updated_at)
+  VALUES (@id, @email, @displayName, @passwordHash, @role, @status, @mustChangePassword, @createdAt, @updatedAt)
 `);
 
 function seedUsersIfNeeded() {
@@ -151,6 +162,8 @@ function seedUsersIfNeeded() {
       displayName: user.displayName,
       passwordHash: bcrypt.hashSync(user.password, 12),
       role: user.role,
+      status: user.status || "active",
+      mustChangePassword: user.mustChangePassword ? 1 : 0,
       createdAt: timestamp,
       updatedAt: timestamp,
     });
@@ -184,8 +197,56 @@ function seedStorageIfNeeded() {
   });
 }
 
+function applyHostedStorageDefaultsIfNeeded() {
+  if (defaultStorageSettings.provider === "Local Disk") {
+    return;
+  }
+
+  const existing = db.prepare("SELECT * FROM storage_settings WHERE id = 1").get();
+  if (!existing) {
+    return;
+  }
+
+  const isStillLocalBootstrap =
+    existing.provider === "Local Disk" &&
+    existing.bucket === "yt-asr-local" &&
+    !existing.endpoint_url &&
+    !existing.access_key_id &&
+    !existing.secret_access_key;
+
+  if (!isStillLocalBootstrap) {
+    return;
+  }
+
+  db.prepare(`
+    UPDATE storage_settings
+    SET
+      provider = @provider,
+      bucket = @bucket,
+      prefix_value = @prefix,
+      endpoint_url = @endpointUrl,
+      region = @region,
+      addressing_mode = @addressingMode,
+      access_key_id = @accessKeyId,
+      secret_access_key = @secretAccessKey,
+      audit_visible = @auditVisible
+    WHERE id = 1
+  `).run({
+    provider: defaultStorageSettings.provider,
+    bucket: defaultStorageSettings.bucket,
+    prefix: defaultStorageSettings.prefix,
+    endpointUrl: defaultStorageSettings.endpointUrl,
+    region: defaultStorageSettings.region,
+    addressingMode: defaultStorageSettings.addressingMode,
+    accessKeyId: defaultStorageSettings.accessKeyId,
+    secretAccessKey: defaultStorageSettings.secretAccessKey,
+    auditVisible: defaultStorageSettings.auditVisible ? 1 : 0,
+  });
+}
+
 seedUsersIfNeeded();
 seedStorageIfNeeded();
+applyHostedStorageDefaultsIfNeeded();
 
 export function sanitizeUser(row) {
   return {
@@ -194,6 +255,9 @@ export function sanitizeUser(row) {
     email: row.email,
     role: row.role,
     status: row.status,
+    mustChangePassword: Boolean(row.must_change_password),
+    createdAt: row.created_at,
+    updatedAt: row.updated_at,
     lastLoginAt: row.last_login_at,
   };
 }
@@ -210,6 +274,160 @@ export function findUserByEmail(email) {
 
 export function listUsers() {
   return db.prepare("SELECT * FROM users ORDER BY display_name ASC").all().map(sanitizeUser);
+}
+
+function countActiveAdmins() {
+  const row = db
+    .prepare("SELECT COUNT(*) AS count FROM users WHERE role = 'admin' AND status = 'active'")
+    .get();
+  return Number(row?.count || 0);
+}
+
+function assertAdminRetention(targetUserId, nextRole, nextStatus) {
+  const current = getUserById(targetUserId);
+  if (!current) {
+    throw new Error("User not found.");
+  }
+
+  const currentIsActiveAdmin = current.role === "admin" && current.status === "active";
+  const nextIsActiveAdmin = nextRole === "admin" && nextStatus === "active";
+  if (!currentIsActiveAdmin || nextIsActiveAdmin) {
+    return;
+  }
+
+  if (countActiveAdmins() <= 1) {
+    throw new Error("At least one active admin account must remain available.");
+  }
+}
+
+export function createUserAccount({ email, displayName, role, password, status = "active", mustChangePassword = false }) {
+  const normalizedEmail = String(email || "").trim().toLowerCase();
+  const normalizedDisplayName = String(displayName || "").trim();
+  const normalizedRole = role === "admin" ? "admin" : "user";
+  const normalizedStatus = status === "disabled" ? "disabled" : "active";
+  const normalizedPassword = String(password || "");
+
+  if (!normalizedEmail) {
+    throw new Error("Email is required.");
+  }
+  if (!normalizedDisplayName) {
+    throw new Error("Display name is required.");
+  }
+  if (normalizedPassword.length < 8) {
+    throw new Error("Password must be at least 8 characters long.");
+  }
+  if (findUserByEmail(normalizedEmail)) {
+    throw new Error("A user with that email already exists.");
+  }
+
+  const timestamp = nowIso();
+  const userId = randomId("user");
+  insertUserStatement.run({
+    id: userId,
+    email: normalizedEmail,
+    displayName: normalizedDisplayName,
+    passwordHash: bcrypt.hashSync(normalizedPassword, 12),
+    role: normalizedRole,
+    status: normalizedStatus,
+    mustChangePassword: mustChangePassword ? 1 : 0,
+    createdAt: timestamp,
+    updatedAt: timestamp,
+  });
+
+  return sanitizeUser(getUserById(userId));
+}
+
+export function updateUserAccount(userId, patch) {
+  const current = getUserById(userId);
+  if (!current) {
+    throw new Error("User not found.");
+  }
+
+  const nextDisplayName = String(patch.displayName ?? current.display_name).trim();
+  const nextRole = patch.role === "admin" ? "admin" : patch.role === "user" ? "user" : current.role;
+  const nextStatus = patch.status === "disabled" ? "disabled" : patch.status === "active" ? "active" : current.status;
+  assertAdminRetention(userId, nextRole, nextStatus);
+
+  if (!nextDisplayName) {
+    throw new Error("Display name is required.");
+  }
+
+  db.prepare(`
+    UPDATE users
+    SET
+      display_name = @displayName,
+      role = @role,
+      status = @status,
+      updated_at = @updatedAt
+    WHERE id = @id
+  `).run({
+    id: userId,
+    displayName: nextDisplayName,
+    role: nextRole,
+    status: nextStatus,
+    updatedAt: nowIso(),
+  });
+
+  return sanitizeUser(getUserById(userId));
+}
+
+export function resetUserPassword(userId, nextPassword, mustChangePassword = true) {
+  const current = getUserById(userId);
+  if (!current) {
+    throw new Error("User not found.");
+  }
+
+  const normalizedPassword = String(nextPassword || "");
+  if (normalizedPassword.length < 8) {
+    throw new Error("Password must be at least 8 characters long.");
+  }
+
+  db.prepare(`
+    UPDATE users
+    SET
+      password_hash = @passwordHash,
+      must_change_password = @mustChangePassword,
+      updated_at = @updatedAt
+    WHERE id = @id
+  `).run({
+    id: userId,
+    passwordHash: bcrypt.hashSync(normalizedPassword, 12),
+    mustChangePassword: mustChangePassword ? 1 : 0,
+    updatedAt: nowIso(),
+  });
+
+  return sanitizeUser(getUserById(userId));
+}
+
+export function changeUserPassword(userId, currentPassword, nextPassword) {
+  const current = getUserById(userId);
+  if (!current) {
+    throw new Error("User not found.");
+  }
+
+  if (!bcrypt.compareSync(String(currentPassword || ""), current.password_hash)) {
+    throw new Error("Current password is incorrect.");
+  }
+
+  const normalizedPassword = String(nextPassword || "");
+  if (normalizedPassword.length < 8) {
+    throw new Error("New password must be at least 8 characters long.");
+  }
+
+  db.prepare(`
+    UPDATE users
+    SET
+      password_hash = @passwordHash,
+      must_change_password = 0,
+      updated_at = @updatedAt
+    WHERE id = @id
+  `).run({
+    id: userId,
+    passwordHash: bcrypt.hashSync(normalizedPassword, 12),
+    updatedAt: nowIso(),
+  });
+
+  return sanitizeUser(getUserById(userId));
 }
 
 export function updateUserLastLogin(userId) {
@@ -247,7 +465,7 @@ export function getSessionWithUser(sessionId) {
         SELECT sessions.id AS session_id, sessions.expires_at, users.*
         FROM sessions
         JOIN users ON users.id = sessions.user_id
-        WHERE sessions.id = ?
+        WHERE sessions.id = ? AND users.status = 'active'
       `)
       .get(sessionId) || null
   );
@@ -692,6 +910,24 @@ export function claimNextQueuedJob() {
   }
 
   return getJob(row.id);
+}
+
+export function recoverInterruptedJobs() {
+  db.prepare(`
+    UPDATE jobs
+    SET status = 'queued', started_at = NULL, message = 'Recovered after process restart'
+    WHERE status = 'running' AND title_id IS NULL
+  `).run();
+
+  db.prepare(`
+    UPDATE jobs
+    SET
+      status = 'failed',
+      error_text = 'The worker process restarted after the title was partially created. Review the title library before retrying.',
+      message = 'Interrupted after partial processing',
+      completed_at = ?
+    WHERE status = 'running' AND title_id IS NOT NULL
+  `).run(nowIso());
 }
 
 export function updateJobProgress(jobId, progress, message, titleId = undefined) {

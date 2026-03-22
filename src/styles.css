@@ -488,6 +488,33 @@ h3 {
   grid-template-columns: repeat(2, minmax(0, 1fr));
 }
 
+.settings-form.single-column {
+  grid-template-columns: 1fr;
+}
+
+.span-two {
+  grid-column: 1 / -1;
+}
+
+.import-textarea {
+  min-height: 120px;
+}
+
+.user-admin-grid {
+  display: grid;
+  gap: 0.9rem;
+  grid-template-columns: repeat(auto-fit, minmax(280px, 1fr));
+}
+
+.user-admin-card {
+  display: grid;
+  gap: 0.9rem;
+}
+
+.warning-note {
+  color: var(--amber);
+}
+
 .check-field,
 .mini-check {
   display: inline-flex;

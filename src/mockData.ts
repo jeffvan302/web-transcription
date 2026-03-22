@@ -32,6 +32,9 @@ const users: User[] = [
     email: "maya@yt-asr.local",
     role: "user",
     status: "active",
+    mustChangePassword: false,
+    createdAt: "2026-03-01T09:00:00.000Z",
+    updatedAt: "2026-03-19T20:17:00.000Z",
     lastLoginAt: "2026-03-19T20:17:00.000Z",
   },
   {
@@ -40,6 +43,9 @@ const users: User[] = [
     email: "jordan@yt-asr.local",
     role: "user",
     status: "active",
+    mustChangePassword: false,
+    createdAt: "2026-03-01T09:00:00.000Z",
+    updatedAt: "2026-03-18T14:11:00.000Z",
     lastLoginAt: "2026-03-18T14:11:00.000Z",
   },
   {
@@ -48,6 +54,9 @@ const users: User[] = [
     email: "theo@yt-asr.local",
     role: "admin",
     status: "active",
+    mustChangePassword: false,
+    createdAt: "2026-03-01T09:00:00.000Z",
+    updatedAt: "2026-03-20T06:42:00.000Z",
     lastLoginAt: "2026-03-20T06:42:00.000Z",
   },
 ];

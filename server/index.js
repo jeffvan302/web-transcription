@@ -7,11 +7,13 @@ import express from "express";
 import multer from "multer";
 import {
   buildAppState,
+  changeUserPassword,
   closeCheckoutRecords,
   createJob,
   createCheckoutRecord,
   createOrReplaceDraft,
   createSession,
+  createUserAccount,
   deleteSession,
   deleteTitleRecord,
   findUserByEmail,
@@ -20,16 +22,21 @@ import {
   getSessionWithUser,
   getStorageSettings,
   getTitleRow,
+  getUserById,
   insertAuditRecord,
   listJobs,
   markStorageConnectionTest,
+  recoverInterruptedJobs,
+  resetUserPassword,
   sanitizeUser,
   saveStorageSettings,
+  updateUserAccount,
   updateTitleRecord,
   updateUserLastLogin,
 } from "./database.js";
 import { appConfig, paths } from "./config.js";
 import { createAsrArchive } from "./asr.js";
+import { listSubtitleStreams } from "./media.js";
 import { startJobWorker } from "./jobs.js";
 import { getYouTubeMetadata } from "./media.js";
 import { getObjectKey, getStorageService } from "./storage.js";
@@ -47,6 +54,71 @@ const upload = multer({
     fileSize: 1024 * 1024 * 1024,
   },
 });
+
+const mediaProbeDir = path.join(paths.inboxDir, "media-probes");
+ensureDir(mediaProbeDir);
+
+function validatePasswordStrength(password, fieldLabel = "Password") {
+  const value = String(password || "");
+  if (value.length < 8) {
+    throw new Error(`${fieldLabel} must be at least 8 characters long.`);
+  }
+}
+
+function normalizeDisplayName(value, fallback = "User") {
+  return String(value || "").trim() || fallback;
+}
+
+function normalizeEmail(value) {
+  return String(value || "").trim().toLowerCase();
+}
+
+function parseYouTubeUrls(input) {
+  const values = Array.isArray(input) ? input : [input];
+  return [
+    ...new Set(
+      values
+        .flatMap((value) => String(value || "").split(/[\r\n,\s]+/))
+        .map((value) => value.trim())
+        .filter(Boolean),
+    ),
+  ];
+}
+
+function buildMediaProbeManifest(file) {
+  const probeToken = randomId("media-probe");
+  const manifestPath = path.join(mediaProbeDir, `${probeToken}.json`);
+  const payload = {
+    probeToken,
+    filePath: file.path,
+    originalName: file.originalname,
+    createdAt: nowIso(),
+  };
+  fs.writeFileSync(manifestPath, JSON.stringify(payload, null, 2));
+  return payload;
+}
+
+function readMediaProbeManifest(probeToken) {
+  if (!probeToken) {
+    return null;
+  }
+  const manifestPath = path.join(mediaProbeDir, `${probeToken}.json`);
+  if (!fs.existsSync(manifestPath)) {
+    return null;
+  }
+  return parseJson(fs.readFileSync(manifestPath, "utf8"), null);
+}
+
+function deleteMediaProbeManifest(probeToken) {
+  if (!probeToken) {
+    return;
+  }
+
+  const manifestPath = path.join(mediaProbeDir, `${probeToken}.json`);
+  if (fs.existsSync(manifestPath)) {
+    fs.rmSync(manifestPath, { force: true });
+  }
+}
 
 app.use(express.json({ limit: "25mb" }));
 app.use(cookieParser());
@@ -250,6 +322,26 @@ app.post("/api/auth/logout", requireUser, (req, res) => {
   res.json({ ok: true });
 });
 
+app.post("/api/auth/change-password", requireUser, (req, res) => {
+  const currentPassword = String(req.body?.currentPassword || "");
+  const nextPassword = String(req.body?.nextPassword || "");
+
+  try {
+    validatePasswordStrength(nextPassword, "New password");
+    changeUserPassword(req.user.id, currentPassword, nextPassword);
+    insertAuditRecord({
+      eventType: "password_change",
+      titleName: "Workspace",
+      actorUserId: req.user.id,
+      actorDisplayName: req.user.displayName,
+      details: "Changed account password.",
+    });
+    sendAppState(res, req.user.id);
+  } catch (error) {
+    res.status(400).json({ error: error instanceof Error ? error.message : "Password change failed." });
+  }
+});
+
 app.get("/api/state", requireUser, (req, res) => {
   reqUserDisplayNameCache.set(req.user.id, req.user.displayName);
   sendAppState(res, req.user.id);
@@ -257,6 +349,87 @@ app.get("/api/state", requireUser, (req, res) => {
 
 app.get("/api/jobs", requireUser, (req, res) => {
   res.json({ jobs: listJobs(req.user.id, 30) });
+});
+
+app.post("/api/admin/users", requireAdmin, (req, res) => {
+  try {
+    const password = String(req.body?.password || "");
+    validatePasswordStrength(password);
+    const createdUser = createUserAccount({
+      email: normalizeEmail(req.body?.email),
+      displayName: normalizeDisplayName(req.body?.displayName),
+      role: req.body?.role === "admin" ? "admin" : "user",
+      password,
+      status: req.body?.status === "disabled" ? "disabled" : "active",
+      mustChangePassword: Boolean(req.body?.mustChangePassword),
+    });
+
+    insertAuditRecord({
+      eventType: "user_create",
+      titleName: "Workspace",
+      actorUserId: req.user.id,
+      actorDisplayName: req.user.displayName,
+      details: `Created user ${createdUser.displayName} (${createdUser.email}).`,
+    });
+
+    sendAppState(res, req.user.id);
+  } catch (error) {
+    res.status(400).json({ error: error instanceof Error ? error.message : "Could not create user." });
+  }
+});
+
+app.patch("/api/admin/users/:userId", requireAdmin, (req, res) => {
+  try {
+    const targetUser = getUserById(req.params.userId);
+    if (!targetUser) {
+      res.status(404).json({ error: "User not found." });
+      return;
+    }
+
+    if (targetUser.id === req.user.id && req.body?.status === "disabled") {
+      res.status(400).json({ error: "You cannot disable your own account." });
+      return;
+    }
+
+    const updated = updateUserAccount(req.params.userId, {
+      displayName: req.body?.displayName,
+      role: req.body?.role,
+      status: req.body?.status,
+    });
+
+    insertAuditRecord({
+      eventType: "user_update",
+      titleName: "Workspace",
+      actorUserId: req.user.id,
+      actorDisplayName: req.user.displayName,
+      details: `Updated user ${updated.displayName}: role ${updated.role}, status ${updated.status}.`,
+    });
+
+    sendAppState(res, req.user.id);
+  } catch (error) {
+    res.status(400).json({ error: error instanceof Error ? error.message : "Could not update user." });
+  }
+});
+
+app.post("/api/admin/users/:userId/reset-password", requireAdmin, (req, res) => {
+  try {
+    const nextPassword = String(req.body?.nextPassword || "");
+    validatePasswordStrength(nextPassword);
+    const updated = resetUserPassword(req.params.userId, nextPassword, req.body?.mustChangePassword !== false);
+
+    insertAuditRecord({
+      eventType: "password_reset",
+      titleName: "Workspace",
+      actorUserId: req.user.id,
+      actorDisplayName: req.user.displayName,
+      details: `Reset password for ${updated.displayName}.`,
+    });
+
+    sendAppState(res, req.user.id);
+  } catch (error) {
+    const statusCode = error instanceof Error && error.message === "User not found." ? 404 : 400;
+    res.status(statusCode).json({ error: error instanceof Error ? error.message : "Could not reset password." });
+  }
 });
 
 app.post("/api/youtube/probe", requireUser, async (req, res, next) => {
@@ -539,19 +712,41 @@ app.delete("/api/titles/:titleId", requireAdmin, async (req, res, next) => {
 });
 
 app.post("/api/import/youtube", requireUser, (req, res) => {
-  const url = String(req.body?.url || "").trim();
+  const urls = parseYouTubeUrls(req.body?.urls || req.body?.url);
   const language = String(req.body?.language || "en").trim() || "en";
-  if (!url) {
-    res.status(400).json({ error: "A YouTube URL is required." });
+  if (urls.length === 0) {
+    res.status(400).json({ error: "At least one YouTube URL is required." });
     return;
   }
 
-  const job = createJob("youtube_import", req.user.id, {
-    url,
-    language,
-    actorDisplayName: req.user.displayName,
-  });
-  res.status(202).json({ job });
+  const jobs = urls.map((url) =>
+    createJob("youtube_import", req.user.id, {
+      url,
+      language,
+      actorDisplayName: req.user.displayName,
+    }),
+  );
+  res.status(202).json({ jobs, job: jobs[0] || null });
+});
+
+app.post("/api/import/media/probe", requireUser, upload.single("media"), async (req, res, next) => {
+  try {
+    if (!req.file) {
+      res.status(400).json({ error: "A media file is required for probing." });
+      return;
+    }
+
+    const subtitleStreams = await listSubtitleStreams(req.file.path);
+    const manifest = buildMediaProbeManifest(req.file);
+
+    res.json({
+      probeToken: manifest.probeToken,
+      subtitleStreams,
+      suggestedTitle: path.basename(req.file.originalname, path.extname(req.file.originalname)),
+    });
+  } catch (error) {
+    next(error);
+  }
 });
 
 app.post(
@@ -564,24 +759,28 @@ app.post(
   (req, res) => {
     const mediaFile = req.files?.media?.[0];
     const subtitleFile = req.files?.subtitle?.[0];
-    if (!mediaFile) {
+    const probeManifest = readMediaProbeManifest(req.body?.probeToken);
+    const effectiveMediaPath = mediaFile?.path || probeManifest?.filePath || null;
+    const effectiveMediaName = mediaFile?.originalname || probeManifest?.originalName || "";
+
+    if (!effectiveMediaPath) {
       res.status(400).json({ error: "A media file is required." });
       return;
     }
 
     const job = createJob("media_import", req.user.id, {
-      mediaFilePath: mediaFile.path,
+      mediaFilePath: effectiveMediaPath,
       subtitleFilePath: subtitleFile?.path || null,
       subtitleStreamIndex:
         req.body?.subtitleStreamIndex !== undefined && req.body?.subtitleStreamIndex !== ""
           ? Number(req.body.subtitleStreamIndex)
           : null,
-      title: String(req.body?.title || path.basename(mediaFile.originalname, path.extname(mediaFile.originalname))),
+      title: String(req.body?.title || path.basename(effectiveMediaName, path.extname(effectiveMediaName))),
       source: String(req.body?.source || "Uploaded Media"),
       language: String(req.body?.language || "en"),
       actorDisplayName: req.user.displayName,
     });
-
+    deleteMediaProbeManifest(req.body?.probeToken);
     res.status(202).json({ job });
   },
 );
@@ -786,6 +985,7 @@ if (fs.existsSync(paths.distDir)) {
   });
 }
 
+recoverInterruptedJobs();
 startJobWorker();
 
 app.listen(appConfig.port, () => {

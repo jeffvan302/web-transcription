@@ -1,4 +1,4 @@
-import type { AppStateResponse, JobRecord, SaveKind, StorageConfig, TitleRecord } from "./types";
+import type { AppStateResponse, JobRecord, Role, SaveKind, StorageConfig, SubtitleStreamRecord, TitleRecord, UserStatus } from "./types";
 
 async function readJson<T>(response: Response): Promise<T> {
   const payload = (await response.json().catch(() => ({}))) as T & { error?: string };
@@ -33,6 +33,12 @@ export const api = {
   logout() {
     return requestJson<{ ok: boolean }>("/api/auth/logout", { method: "POST" });
   },
+  changePassword(currentPassword: string, nextPassword: string) {
+    return requestJson<AppStateResponse>("/api/auth/change-password", {
+      method: "POST",
+      body: JSON.stringify({ currentPassword, nextPassword }),
+    });
+  },
   getState() {
     return requestJson<AppStateResponse>("/api/state");
   },
@@ -57,11 +63,52 @@ export const api = {
   deleteTitle(titleId: string) {
     return requestJson<AppStateResponse>(`/api/titles/${titleId}`, { method: "DELETE" });
   },
-  queueYouTubeImport(url: string, language: string) {
-    return requestJson<{ job: JobRecord }>("/api/import/youtube", {
+  createUser(input: {
+    email: string;
+    displayName: string;
+    role: Role;
+    password: string;
+    status: UserStatus;
+    mustChangePassword: boolean;
+  }) {
+    return requestJson<AppStateResponse>("/api/admin/users", {
       method: "POST",
-      body: JSON.stringify({ url, language }),
+      body: JSON.stringify(input),
     });
+  },
+  updateUser(
+    userId: string,
+    input: {
+      displayName?: string;
+      role?: Role;
+      status?: UserStatus;
+    },
+  ) {
+    return requestJson<AppStateResponse>(`/api/admin/users/${userId}`, {
+      method: "PATCH",
+      body: JSON.stringify(input),
+    });
+  },
+  resetUserPassword(userId: string, nextPassword: string, mustChangePassword = true) {
+    return requestJson<AppStateResponse>(`/api/admin/users/${userId}/reset-password`, {
+      method: "POST",
+      body: JSON.stringify({ nextPassword, mustChangePassword }),
+    });
+  },
+  queueYouTubeImport(urls: string[], language: string) {
+    return requestJson<{ jobs: JobRecord[]; job: JobRecord | null }>("/api/import/youtube", {
+      method: "POST",
+      body: JSON.stringify({ urls, language }),
+    });
+  },
+  probeMedia(formData: FormData) {
+    return requestJson<{ probeToken: string; subtitleStreams: SubtitleStreamRecord[]; suggestedTitle: string }>(
+      "/api/import/media/probe",
+      {
+        method: "POST",
+        body: formData,
+      },
+    );
   },
   queueMediaImport(formData: FormData) {
     return requestJson<{ job: JobRecord }>("/api/import/media", {

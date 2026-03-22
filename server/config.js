@@ -35,20 +35,48 @@ export const appConfig = {
   environment: process.env.NODE_ENV || "development",
 };
 
+function coerceStorageProvider(value) {
+  const normalized = String(value || "").trim().toLowerCase();
+  if (!normalized) {
+    return null;
+  }
+  if (normalized === "local" || normalized === "local disk") {
+    return "Local Disk";
+  }
+  if (normalized === "backblaze b2" || normalized === "b2") {
+    return "Backblaze B2";
+  }
+  if (normalized === "amazon s3" || normalized === "s3") {
+    return "Amazon S3";
+  }
+  if (normalized === "cloudflare r2" || normalized === "r2") {
+    return "Cloudflare R2";
+  }
+  if (normalized === "minio") {
+    return "MinIO";
+  }
+  return null;
+}
+
+const envStorageProvider =
+  coerceStorageProvider(process.env.STORAGE_PROVIDER) ||
+  (process.env.STORAGE_BUCKET ? "Amazon S3" : null) ||
+  "Local Disk";
+
 export const defaultStorageSettings = {
-  provider: "Local Disk",
-  bucket: "yt-asr-local",
-  prefix: "workspace/",
-  endpointUrl: "",
-  region: "local",
-  addressingMode: "path",
-  accessKeyId: "",
-  secretAccessKey: "",
-  auditVisible: true,
+  provider: envStorageProvider,
+  bucket: process.env.STORAGE_BUCKET || (envStorageProvider === "Local Disk" ? "yt-asr-local" : ""),
+  prefix: process.env.STORAGE_PREFIX || "workspace/",
+  endpointUrl: process.env.STORAGE_ENDPOINT_URL || "",
+  region: process.env.STORAGE_REGION || (envStorageProvider === "Local Disk" ? "local" : "auto"),
+  addressingMode: process.env.STORAGE_ADDRESSING_MODE || "path",
+  accessKeyId: process.env.STORAGE_ACCESS_KEY_ID || "",
+  secretAccessKey: process.env.STORAGE_SECRET_ACCESS_KEY || "",
+  auditVisible: process.env.STORAGE_AUDIT_VISIBLE ? process.env.STORAGE_AUDIT_VISIBLE === "true" : true,
   lastConnectionTestAt: null,
 };
 
-export const seededUsers = [
+const developmentUsers = [
   {
     email: "maya@yt-asr.local",
     displayName: "Maya Editor",
@@ -68,3 +96,35 @@ export const seededUsers = [
     password: "admin1234",
   },
 ];
+
+function parseBootstrapUsers() {
+  if (process.env.BOOTSTRAP_USERS_JSON) {
+    try {
+      const parsed = JSON.parse(process.env.BOOTSTRAP_USERS_JSON);
+      if (Array.isArray(parsed)) {
+        return parsed.filter(Boolean);
+      }
+    } catch (error) {
+      console.warn("BOOTSTRAP_USERS_JSON could not be parsed. Falling back to default bootstrap rules.", error);
+    }
+  }
+
+  if (process.env.BOOTSTRAP_ADMIN_EMAIL && process.env.BOOTSTRAP_ADMIN_PASSWORD) {
+    return [
+      {
+        email: process.env.BOOTSTRAP_ADMIN_EMAIL,
+        displayName: process.env.BOOTSTRAP_ADMIN_DISPLAY_NAME || "Bootstrap Admin",
+        role: "admin",
+        password: process.env.BOOTSTRAP_ADMIN_PASSWORD,
+      },
+    ];
+  }
+
+  if (appConfig.environment !== "production") {
+    return developmentUsers;
+  }
+
+  return [];
+}
+
+export const seededUsers = parseBootstrapUsers();

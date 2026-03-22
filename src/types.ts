@@ -1,4 +1,5 @@
 export type Role = "user" | "admin";
+export type UserStatus = "active" | "disabled";
 export type StatusTone = "info" | "success" | "warning" | "error";
 export type View = "editor" | "shared" | "settings";
 export type SourceType = "youtube" | "local" | "package";
@@ -10,7 +11,10 @@ export interface User {
   displayName: string;
   email: string;
   role: Role;
-  status: "active" | "disabled";
+  status: UserStatus;
+  mustChangePassword: boolean;
+  createdAt: string;
+  updatedAt: string;
   lastLoginAt: string | null;
 }
 
@@ -56,6 +60,10 @@ export interface AuditRecord {
   id: string;
   eventType:
     | "login"
+    | "password_change"
+    | "password_reset"
+    | "user_create"
+    | "user_update"
     | "title_upload"
     | "title_import"
     | "checkout"
@@ -71,6 +79,13 @@ export interface AuditRecord {
   actorDisplayName: string;
   timestamp: string;
   details: string;
+}
+
+export interface SubtitleStreamRecord {
+  index: number;
+  codecName: string;
+  language: string;
+  title: string;
 }
 
 export interface StorageConfig {

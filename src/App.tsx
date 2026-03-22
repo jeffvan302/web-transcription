@@ -5,20 +5,19 @@ import type {
   JobRecord,
   PersistedState,
   Phrase,
+  Role,
   SaveKind,
   StatusTone,
   StorageProvider,
+  SubtitleStreamRecord,
   TitleRecord,
+  User,
+  UserStatus,
   View,
 } from "./types";
 
 const LANGUAGES = ["en", "es", "fr", "de", "pt-BR"];
-const WORKSPACES = ["Shared Workspace", "Review Queue", "Archive Preview"];
-const DEV_ACCOUNTS = [
-  { email: "maya@yt-asr.local", password: "maya1234", label: "Maya Editor" },
-  { email: "jordan@yt-asr.local", password: "jordan1234", label: "Jordan Reviewer" },
-  { email: "theo@yt-asr.local", password: "admin1234", label: "Theo Admin" },
-];
+const PRIMARY_WORKSPACE = "Primary Workspace";
 
 type PlaybackState = "stopped" | "playing" | "paused";
 type DragState =
@@ -31,6 +30,14 @@ interface StatusMessage {
   text: string;
 }
 
+interface UserAdminDraft {
+  displayName: string;
+  role: Role;
+  status: UserStatus;
+  resetPassword: string;
+  mustChangePassword: boolean;
+}
+
 const EMPTY_STATE: PersistedState = {
   sessionUserId: null,
   selectedTitleId: "",
@@ -38,7 +45,7 @@ const EMPTY_STATE: PersistedState = {
   currentView: "editor",
   youtubeUrl: "",
   importLanguage: "en",
-  workspaceName: WORKSPACES[0],
+  workspaceName: PRIMARY_WORKSPACE,
   users: [],
   titles: [],
   storage: {
@@ -85,6 +92,17 @@ function formatTimestamp(value: string | null) {
   }).format(new Date(value));
 }
 
+function parseYouTubeEntries(value: string) {
+  return [
+    ...new Set(
+      String(value || "")
+        .split(/[\r\n,\s]+/)
+        .map((entry) => entry.trim())
+        .filter(Boolean),
+    ),
+  ];
+}
+
 function createWavePoints(width: number, height: number) {
   const points: string[] = [];
 
@@ -111,8 +129,8 @@ export default function App() {
   });
   const [loadingState, setLoadingState] = useState(true);
   const [authInFlight, setAuthInFlight] = useState(false);
-  const [loginEmail, setLoginEmail] = useState(DEV_ACCOUNTS[2].email);
-  const [loginPassword, setLoginPassword] = useState(DEV_ACCOUNTS[2].password);
+  const [loginEmail, setLoginEmail] = useState("");
+  const [loginPassword, setLoginPassword] = useState("");
   const [playbackState, setPlaybackState] = useState<PlaybackState>("stopped");
   const [loopPlayback, setLoopPlayback] = useState(false);
   const [playbackSpeed, setPlaybackSpeed] = useState(1);
@@ -129,6 +147,24 @@ export default function App() {
   const [mediaLanguage, setMediaLanguage] = useState("en");
   const [mediaFile, setMediaFile] = useState<File | null>(null);
   const [subtitleFile, setSubtitleFile] = useState<File | null>(null);
+  const [mediaProbeToken, setMediaProbeToken] = useState("");
+  const [mediaProbeInFlight, setMediaProbeInFlight] = useState(false);
+  const [mediaSubtitleStreams, setMediaSubtitleStreams] = useState<SubtitleStreamRecord[]>([]);
+  const [selectedSubtitleStreamIndex, setSelectedSubtitleStreamIndex] = useState<string>("");
+  const [passwordForm, setPasswordForm] = useState({
+    currentPassword: "",
+    nextPassword: "",
+    confirmPassword: "",
+  });
+  const [createUserForm, setCreateUserForm] = useState({
+    email: "",
+    displayName: "",
+    password: "",
+    role: "user" as Role,
+    status: "active" as UserStatus,
+    mustChangePassword: true,
+  });
+  const [userDrafts, setUserDrafts] = useState<Record<string, UserAdminDraft>>({});
   const [storageAccessKeyId, setStorageAccessKeyId] = useState("");
   const [storageSecretAccessKey, setStorageSecretAccessKey] = useState("");
 
@@ -137,6 +173,9 @@ export default function App() {
   const audioRef = useRef<HTMLAudioElement | null>(null);
   const asrImportInputRef = useRef<HTMLInputElement | null>(null);
   const seenTerminalJobsRef = useRef<Set<string>>(new Set());
+  const appStateRef = useRef<PersistedState>(EMPTY_STATE);
+  const textDraftRef = useRef("");
+  const textDraftDirtyRef = useRef(false);
 
   const currentUser = appState.users.find((user) => user.id === appState.sessionUserId) ?? null;
   const selectedTitle =
@@ -146,6 +185,7 @@ export default function App() {
     selectedTitle?.phrases[0] ??
     null;
   const editable = Boolean(currentUser && selectedTitle?.checkedOutByUserId === currentUser.id);
+  const canEdit = editable && !saveInFlight;
   const viewRange = selectedTitle ? selectedTitle.duration / waveZoom : 10;
   const visibleStart = clamp(wavePan, 0, Math.max(0, (selectedTitle?.duration ?? 0) - viewRange));
   const visibleEnd = visibleStart + viewRange;
@@ -164,14 +204,53 @@ export default function App() {
   }, []);
 
   useEffect(() => {
+    appStateRef.current = appState;
+  }, [appState]);
+
+  useEffect(() => {
+    textDraftRef.current = textDraft;
+  }, [textDraft]);
+
+  useEffect(() => {
+    textDraftDirtyRef.current = textDraftDirty;
+  }, [textDraftDirty]);
+
+  useEffect(() => {
+    setUserDrafts((current) => {
+      const nextDrafts: Record<string, UserAdminDraft> = {};
+      appState.users.forEach((user) => {
+        nextDrafts[user.id] = current[user.id]
+          ? {
+              ...current[user.id],
+              displayName: current[user.id].displayName || user.displayName,
+              role: current[user.id].role,
+              status: current[user.id].status,
+              mustChangePassword: current[user.id].mustChangePassword,
+            }
+          : {
+              displayName: user.displayName,
+              role: user.role,
+              status: user.status,
+              resetPassword: "",
+              mustChangePassword: user.mustChangePassword,
+            };
+      });
+      return nextDrafts;
+    });
+  }, [appState.users]);
+
+  useEffect(() => {
     if (!selectedPhrase) {
       setTextDraft("");
+      textDraftRef.current = "";
       setTimingDraft({ start: "0.00", end: "0.00" });
       return;
     }
 
     setTextDraft(selectedPhrase.text);
+    textDraftRef.current = selectedPhrase.text;
     setTextDraftDirty(false);
+    textDraftDirtyRef.current = false;
     setTimingDraft({
       start: selectedPhrase.start.toFixed(2),
       end: selectedPhrase.end.toFixed(2),
@@ -204,8 +283,8 @@ export default function App() {
     }
 
     const interval = window.setInterval(() => {
-      const currentTitle = appState.titles.find((title) => title.id === selectedTitle.id);
-      if (!currentTitle?.draft.isDirty || saveInFlight || textDraftDirty) {
+      const currentTitle = appStateRef.current.titles.find((title) => title.id === selectedTitle.id);
+      if (!currentTitle?.draft.isDirty || saveInFlight) {
         return;
       }
 
@@ -213,7 +292,65 @@ export default function App() {
     }, 4500);
 
     return () => window.clearInterval(interval);
-  }, [appState.titles, editable, saveInFlight, selectedTitle?.id, textDraftDirty]);
+  }, [editable, saveInFlight, selectedTitle?.id]);
+
+  useEffect(() => {
+    if (!editable || !selectedTitle || !textDraftDirty || saveInFlight) {
+      return;
+    }
+
+    const timeout = window.setTimeout(() => {
+      void saveTitle("autosave", selectedTitle.id);
+    }, 2500);
+
+    return () => window.clearTimeout(timeout);
+  }, [editable, saveInFlight, selectedTitle?.id, textDraft, textDraftDirty]);
+
+  useEffect(() => {
+    if (!mediaFile || !currentUser) {
+      setMediaProbeToken("");
+      setMediaProbeInFlight(false);
+      setMediaSubtitleStreams([]);
+      setSelectedSubtitleStreamIndex("");
+      return;
+    }
+
+    let cancelled = false;
+    const formData = new FormData();
+    formData.append("media", mediaFile);
+    setMediaProbeInFlight(true);
+    setMediaSubtitleStreams([]);
+    setSelectedSubtitleStreamIndex("");
+
+    void api
+      .probeMedia(formData)
+      .then((response) => {
+        if (cancelled) {
+          return;
+        }
+
+        setMediaProbeToken(response.probeToken);
+        setMediaSubtitleStreams(response.subtitleStreams);
+        setMediaTitle((current) => (current.trim() ? current : response.suggestedTitle));
+      })
+      .catch((error) => {
+        if (!cancelled) {
+          setMediaProbeToken("");
+          setMediaSubtitleStreams([]);
+          setSelectedSubtitleStreamIndex("");
+          postStatus("warning", error instanceof Error ? error.message : "Could not inspect embedded subtitle tracks.");
+        }
+      })
+      .finally(() => {
+        if (!cancelled) {
+          setMediaProbeInFlight(false);
+        }
+      });
+
+    return () => {
+      cancelled = true;
+    };
+  }, [currentUser, mediaFile]);
 
   useEffect(() => {
     const audio = new Audio();
@@ -322,7 +459,7 @@ export default function App() {
             postStatus("success", latestJob.message || `${latestJob.type.replaceAll("_", " ")} completed.`);
             const stateResponse = await api.getState();
             if (!cancelled) {
-              applyServerResponse(stateResponse);
+              applyServerResponse(stateResponse, { preserveView: true });
             }
           } else {
             postStatus("error", latestJob.error || `${latestJob.type.replaceAll("_", " ")} failed.`);
@@ -435,7 +572,11 @@ export default function App() {
   }
 
   function updateState(updater: (current: PersistedState) => PersistedState) {
-    setAppState((current) => updater(current));
+    setAppState((current) => {
+      const next = updater(current);
+      appStateRef.current = next;
+      return next;
+    });
   }
 
   function updateTitle(titleId: string, updater: (title: TitleRecord) => TitleRecord) {
@@ -445,25 +586,54 @@ export default function App() {
     }));
   }
 
-  function markDirty(titleId: string) {
-    updateTitle(titleId, (title) => ({
-      ...title,
-      draft: { ...title.draft, isDirty: true },
-    }));
-  }
-
-  function applyServerResponse(response: AppStateResponse) {
-    setAppState(response.state);
+  function applyServerResponse(response: AppStateResponse, options: { preserveView?: boolean } = {}) {
+    const current = appStateRef.current;
+    const nextState: PersistedState = {
+      ...response.state,
+      currentView: options.preserveView ? current.currentView : response.state.currentView,
+      youtubeUrl: current.youtubeUrl,
+      importLanguage: current.importLanguage || response.state.importLanguage,
+    };
+    appStateRef.current = nextState;
+    setAppState(nextState);
     setJobs(response.jobs);
     setLoadingState(false);
   }
 
   function resetToLoggedOutState(message: string) {
+    appStateRef.current = EMPTY_STATE;
     setAppState(EMPTY_STATE);
     setJobs([]);
     setLoadingState(false);
     setPlaybackState("stopped");
     setPlayheadTime(null);
+    setTextDraft("");
+    textDraftRef.current = "";
+    setTextDraftDirty(false);
+    textDraftDirtyRef.current = false;
+    setPasswordForm({
+      currentPassword: "",
+      nextPassword: "",
+      confirmPassword: "",
+    });
+    setCreateUserForm({
+      email: "",
+      displayName: "",
+      password: "",
+      role: "user",
+      status: "active",
+      mustChangePassword: true,
+    });
+    setUserDrafts({});
+    setMediaTitle("");
+    setMediaSource("");
+    setMediaLanguage("en");
+    setMediaFile(null);
+    setSubtitleFile(null);
+    setMediaProbeToken("");
+    setMediaProbeInFlight(false);
+    setMediaSubtitleStreams([]);
+    setSelectedSubtitleStreamIndex("");
     postStatus("info", message);
   }
 
@@ -484,7 +654,7 @@ export default function App() {
 
     try {
       const response = await api.getState();
-      applyServerResponse(response);
+      applyServerResponse(response, { preserveView: true });
       if (showStatus) {
         postStatus("info", "Library metadata refreshed from the server.");
       }
@@ -494,25 +664,31 @@ export default function App() {
   }
 
   function buildTitlePayload(titleId: string) {
-    const title = appState.titles.find((entry) => entry.id === titleId);
+    const currentState = appStateRef.current;
+    const title = currentState.titles.find((entry) => entry.id === titleId);
     if (!title) {
       return null;
     }
 
-    if (!selectedTitle || selectedTitle.id !== titleId || !selectedPhrase || !textDraftDirty) {
+    if (
+      currentState.selectedTitleId !== titleId ||
+      currentState.selectedPhraseIds.length === 0 ||
+      !textDraftDirtyRef.current
+    ) {
       return title;
     }
 
-    const nextText = textDraft.trim() || "<Sentence>";
+    const selectedPhraseId = currentState.selectedPhraseIds[0];
+    const nextText = textDraftRef.current.trim() || "<Sentence>";
     return {
       ...title,
       phrases: title.phrases.map((phrase) =>
-        phrase.id === selectedPhrase.id ? { ...phrase, text: nextText, reviewed: true } : phrase,
+        phrase.id === selectedPhraseId ? { ...phrase, text: nextText, reviewed: true } : phrase,
       ),
     };
   }
 
-  async function saveTitle(kind: SaveKind, titleId: string) {
+  async function saveTitle(kind: SaveKind, titleId: string, successMessage?: string) {
     const title = buildTitlePayload(titleId);
     if (!title) {
       return;
@@ -525,17 +701,21 @@ export default function App() {
         ...title,
         savedSnapshot: clonePhrases(title.phrases),
       });
-      applyServerResponse(response);
-      setTextDraftDirty(false);
+      applyServerResponse(response, { preserveView: true });
+      if (appStateRef.current.selectedTitleId === titleId) {
+        setTextDraftDirty(false);
+        textDraftDirtyRef.current = false;
+      }
       postStatus(
         "success",
-        kind === "autosave"
-          ? "Autosave complete. Draft is persisted on the server."
-          : kind === "sync"
-            ? "Sync complete. Working draft stayed checked out."
-            : kind === "checkin"
-              ? "Final save complete. Title checked in."
-              : "Save complete. Latest phrase edits are in the working draft.",
+        successMessage ||
+          (kind === "autosave"
+            ? "Autosave complete. Draft is persisted on the server."
+            : kind === "sync"
+              ? "Sync complete. Working draft stayed checked out."
+              : kind === "checkin"
+                ? "Final save complete. Title checked in."
+                : "Save complete. Latest phrase edits are in the working draft."),
       );
     } catch (error) {
       postStatus("error", error instanceof Error ? error.message : "Save failed.");
@@ -544,7 +724,7 @@ export default function App() {
     }
   }
 
-  function markSelectedPhraseReviewed(message: string) {
+  async function markSelectedPhraseReviewed(message: string) {
     if (!selectedTitle || !selectedPhrase) {
       return;
     }
@@ -556,16 +736,16 @@ export default function App() {
       ),
       draft: { ...title.draft, isDirty: true },
     }));
-    postStatus("success", message);
+    await saveTitle("manual", selectedTitle.id, message);
   }
 
-  function commitText() {
+  async function commitText(options: { persist?: boolean } = {}) {
     if (!selectedTitle || !selectedPhrase || !editable) {
       return;
     }
 
-    const nextText = textDraft.trim() || "<Sentence>";
-    if (!textDraftDirty && nextText === selectedPhrase.text) {
+    const nextText = textDraftRef.current.trim() || "<Sentence>";
+    if (!textDraftDirtyRef.current && nextText === selectedPhrase.text) {
       return;
     }
 
@@ -577,13 +757,19 @@ export default function App() {
       draft: { ...title.draft, isDirty: true },
     }));
     setTextDraft(nextText);
+    textDraftRef.current = nextText;
     setTextDraftDirty(false);
-    postStatus("success", "Caption text committed and marked reviewed.");
+    textDraftDirtyRef.current = false;
+    if (options.persist === false) {
+      postStatus("success", "Caption text committed locally.");
+      return;
+    }
+    await saveTitle("manual", selectedTitle.id, "Caption text committed and marked reviewed.");
   }
 
-  function selectTitle(titleId: string) {
-    commitText();
-    const nextTitle = appState.titles.find((title) => title.id === titleId);
+  async function selectTitle(titleId: string) {
+    await commitText();
+    const nextTitle = appStateRef.current.titles.find((title) => title.id === titleId);
     if (!nextTitle) {
       return;
     }
@@ -597,8 +783,8 @@ export default function App() {
     postStatus("info", `${nextTitle.title} loaded.`);
   }
 
-  function selectPhrase(phraseId: string, multi: boolean) {
-    commitText();
+  async function selectPhrase(phraseId: string, multi: boolean) {
+    await commitText();
     updateState((current) => {
       const nextSelection = multi
         ? current.selectedPhraseIds.includes(phraseId)
@@ -650,7 +836,11 @@ export default function App() {
     try {
       const response = await api.login(loginEmail.trim(), loginPassword);
       applyServerResponse(response);
-      postStatus("success", `Signed in as ${response.state.users.find((user) => user.id === response.state.sessionUserId)?.displayName ?? "user"}.`);
+      setLoginPassword("");
+      postStatus(
+        "success",
+        `Signed in as ${response.state.users.find((user) => user.id === response.state.sessionUserId)?.displayName ?? "user"}.`,
+      );
     } catch (error) {
       postStatus("error", error instanceof Error ? error.message : "Sign in failed.");
     } finally {
@@ -663,7 +853,7 @@ export default function App() {
       return;
     }
 
-    commitText();
+    await commitText();
     try {
       await api.logout();
     } catch {
@@ -707,14 +897,139 @@ export default function App() {
   }
 
   function startMarkerDrag(kind: "start" | "end", pointerId: number) {
-    if (!editable) {
+    if (!canEdit) {
       return;
     }
     setDragState({ kind, pointerId });
   }
 
-  function applyTiming() {
-    if (!selectedTitle || !selectedPhrase || !editable) {
+  function updateUserDraft(userId: string, updater: (draft: UserAdminDraft) => UserAdminDraft) {
+    setUserDrafts((current) => ({
+      ...current,
+      [userId]: updater(
+        current[userId] || {
+          displayName: appState.users.find((user) => user.id === userId)?.displayName || "",
+          role: appState.users.find((user) => user.id === userId)?.role || "user",
+          status: appState.users.find((user) => user.id === userId)?.status || "active",
+          resetPassword: "",
+          mustChangePassword: true,
+        },
+      ),
+    }));
+  }
+
+  async function submitPasswordChange() {
+    if (!currentUser) {
+      return;
+    }
+    if (!passwordForm.currentPassword || !passwordForm.nextPassword) {
+      postStatus("warning", "Enter the current password and a new password first.");
+      return;
+    }
+    if (passwordForm.nextPassword !== passwordForm.confirmPassword) {
+      postStatus("warning", "New password confirmation does not match.");
+      return;
+    }
+
+    try {
+      const response = await api.changePassword(passwordForm.currentPassword, passwordForm.nextPassword);
+      applyServerResponse(response, { preserveView: true });
+      setPasswordForm({
+        currentPassword: "",
+        nextPassword: "",
+        confirmPassword: "",
+      });
+      postStatus("success", "Password changed and saved on the server.");
+    } catch (error) {
+      postStatus("error", error instanceof Error ? error.message : "Could not change the password.");
+    }
+  }
+
+  async function submitCreateUser() {
+    if (!currentUser || currentUser.role !== "admin") {
+      return;
+    }
+    if (!createUserForm.email.trim() || !createUserForm.displayName.trim() || !createUserForm.password) {
+      postStatus("warning", "Email, display name, and password are required to create a user.");
+      return;
+    }
+
+    try {
+      const response = await api.createUser({
+        email: createUserForm.email.trim(),
+        displayName: createUserForm.displayName.trim(),
+        password: createUserForm.password,
+        role: createUserForm.role,
+        status: createUserForm.status,
+        mustChangePassword: createUserForm.mustChangePassword,
+      });
+      applyServerResponse(response, { preserveView: true });
+      setCreateUserForm({
+        email: "",
+        displayName: "",
+        password: "",
+        role: "user",
+        status: "active",
+        mustChangePassword: true,
+      });
+      postStatus("success", "New user account created.");
+    } catch (error) {
+      postStatus("error", error instanceof Error ? error.message : "Could not create the user.");
+    }
+  }
+
+  async function saveManagedUser(userId: string) {
+    if (!currentUser || currentUser.role !== "admin") {
+      return;
+    }
+
+    const draft = userDrafts[userId];
+    if (!draft) {
+      return;
+    }
+
+    try {
+      const response = await api.updateUser(userId, {
+        displayName: draft.displayName.trim(),
+        role: draft.role,
+        status: draft.status,
+      });
+      applyServerResponse(response, { preserveView: true });
+      postStatus("success", "User profile updated.");
+    } catch (error) {
+      postStatus("error", error instanceof Error ? error.message : "Could not update the user.");
+    }
+  }
+
+  async function resetManagedUserPassword(userId: string) {
+    if (!currentUser || currentUser.role !== "admin") {
+      return;
+    }
+
+    const draft = userDrafts[userId];
+    if (!draft?.resetPassword) {
+      postStatus("warning", "Enter a temporary password before resetting.");
+      return;
+    }
+
+    try {
+      const response = await api.resetUserPassword(userId, draft.resetPassword, draft.mustChangePassword);
+      applyServerResponse(response, { preserveView: true });
+      setUserDrafts((current) => ({
+        ...current,
+        [userId]: {
+          ...(current[userId] || draft),
+          resetPassword: "",
+        },
+      }));
+      postStatus("success", "User password reset on the server.");
+    } catch (error) {
+      postStatus("error", error instanceof Error ? error.message : "Could not reset the user password.");
+    }
+  }
+
+  async function applyTiming() {
+    if (!selectedTitle || !selectedPhrase || !canEdit) {
       return;
     }
 
@@ -729,11 +1044,11 @@ export default function App() {
       ),
       draft: { ...title.draft, isDirty: true },
     }));
-    postStatus("success", "Manual timing applied to the selected phrase.");
+    await saveTitle("manual", selectedTitle.id, "Manual timing applied to the selected phrase.");
   }
 
-  function resetTiming() {
-    if (!selectedTitle || !selectedPhrase || !editable) {
+  async function resetTiming() {
+    if (!selectedTitle || !selectedPhrase || !canEdit) {
       return;
     }
 
@@ -748,11 +1063,11 @@ export default function App() {
       phrases: title.phrases.map((phrase) => (phrase.id === selectedPhrase.id ? { ...savedPhrase } : phrase)),
       draft: { ...title.draft, isDirty: true },
     }));
-    postStatus("warning", "Segment reset to the latest server-saved draft.");
+    await saveTitle("manual", selectedTitle.id, "Segment reset to the latest server-saved draft.");
   }
 
-  function toggleFlag(field: "enabled" | "reviewed", phraseId: string) {
-    if (!selectedTitle || !editable) {
+  async function toggleFlag(field: "enabled" | "reviewed", phraseId: string) {
+    if (!selectedTitle || !canEdit) {
       return;
     }
 
@@ -763,11 +1078,11 @@ export default function App() {
       ),
       draft: { ...title.draft, isDirty: true },
     }));
-    postStatus("success", `${field === "enabled" ? "Include in export" : "Reviewed"} updated.`);
+    await saveTitle("manual", selectedTitle.id, `${field === "enabled" ? "Include in export" : "Reviewed"} updated.`);
   }
 
-  function addSentence() {
-    if (!selectedTitle || !editable) {
+  async function addSentence() {
+    if (!selectedTitle || !canEdit) {
       return;
     }
 
@@ -793,22 +1108,22 @@ export default function App() {
       return { ...title, phrases, draft: { ...title.draft, isDirty: true } };
     });
     updateState((current) => ({ ...current, selectedPhraseIds: [newPhrase.id] }));
-    postStatus("success", "Added a new sentence and selected it for editing.");
+    await saveTitle("manual", selectedTitle.id, "Added a new sentence and selected it for editing.");
   }
 
-  function splitAtCursor() {
-    if (!selectedTitle || !selectedPhrase || !editable || !textareaRef.current) {
+  async function splitAtCursor() {
+    if (!selectedTitle || !selectedPhrase || !canEdit || !textareaRef.current) {
       return;
     }
 
     const splitIndex = textareaRef.current.selectionStart;
-    if (splitIndex <= 0 || splitIndex >= textDraft.length) {
+    if (splitIndex <= 0 || splitIndex >= textDraftRef.current.length) {
       postStatus("warning", "Place the text cursor inside the phrase before splitting.");
       return;
     }
 
-    const leftText = textDraft.slice(0, splitIndex).trim();
-    const rightText = textDraft.slice(splitIndex).trim();
+    const leftText = textDraftRef.current.slice(0, splitIndex).trim();
+    const rightText = textDraftRef.current.slice(splitIndex).trim();
     if (!leftText || !rightText) {
       postStatus("warning", "Split needs text on both sides of the cursor.");
       return;
@@ -832,18 +1147,18 @@ export default function App() {
       draft: { ...title.draft, isDirty: true },
     }));
     updateState((current) => ({ ...current, selectedPhraseIds: [leftPhrase.id, rightPhrase.id] }));
-    postStatus("success", "Split the selected phrase at the current text cursor.");
+    await saveTitle("manual", selectedTitle.id, "Split the selected phrase at the current text cursor.");
   }
 
-  function combineSelected() {
-    if (!selectedTitle || !editable || appState.selectedPhraseIds.length < 2) {
+  async function combineSelected() {
+    if (!selectedTitle || !canEdit || appStateRef.current.selectedPhraseIds.length < 2) {
       postStatus("warning", "Select at least two adjacent phrases to combine.");
       return;
     }
 
     const selectedEntries = selectedTitle.phrases
       .map((phrase, index) => ({ phrase, index }))
-      .filter(({ phrase }) => appState.selectedPhraseIds.includes(phrase.id));
+      .filter(({ phrase }) => appStateRef.current.selectedPhraseIds.includes(phrase.id));
 
     const contiguous = selectedEntries.every((entry, index, list) => index === 0 || entry.index === list[index - 1].index + 1);
     if (!contiguous) {
@@ -875,7 +1190,7 @@ export default function App() {
       return { ...title, phrases, draft: { ...title.draft, isDirty: true } };
     });
     updateState((current) => ({ ...current, selectedPhraseIds: [merged.id] }));
-    postStatus("success", "Combined the selected adjacent phrases.");
+    await saveTitle("manual", selectedTitle.id, "Combined the selected adjacent phrases.");
   }
 
   async function checkout(titleId: string) {
@@ -906,7 +1221,7 @@ export default function App() {
       return;
     }
 
-    commitText();
+    await commitText({ persist: false });
     await saveTitle("sync", titleId);
   }
 
@@ -921,7 +1236,7 @@ export default function App() {
       return;
     }
 
-    commitText();
+    await commitText({ persist: false });
     await saveTitle("checkin", titleId);
     postStatus("success", `${target.title} is checked in and available to the library.`);
   }
@@ -939,7 +1254,7 @@ export default function App() {
 
     try {
       const response = await api.forceCheckIn(titleId);
-      applyServerResponse(response);
+      applyServerResponse(response, { preserveView: true });
       postStatus("warning", `${target.title} was force checked in by admin.`);
     } catch (error) {
       postStatus("error", error instanceof Error ? error.message : "Force check-in failed.");
@@ -979,27 +1294,23 @@ export default function App() {
       return;
     }
 
-    if (!appState.youtubeUrl.trim()) {
+    const urls = parseYouTubeEntries(appState.youtubeUrl);
+    if (urls.length === 0) {
       postStatus("warning", "Enter a YouTube URL before starting the import.");
       return;
     }
 
     try {
-      const response = await api.queueYouTubeImport(appState.youtubeUrl.trim(), appState.importLanguage);
-      setJobs((current) => [response.job, ...current].slice(0, 30));
-      updateState((current) => ({ ...current, currentView: "shared" }));
-      postStatus("info", "YouTube import queued on the server.");
+      const response = await api.queueYouTubeImport(urls, appState.importLanguage);
+      setJobs((current) => [...response.jobs, ...current].slice(0, 30));
+      updateState((current) => ({ ...current, currentView: "shared", youtubeUrl: "" }));
+      postStatus("info", `${response.jobs.length} YouTube import${response.jobs.length === 1 ? "" : "s"} queued on the server.`);
     } catch (error) {
       postStatus("error", error instanceof Error ? error.message : "Could not queue the YouTube import.");
     }
   }
 
   function createImportedTitle(sourceType: TitleRecord["sourceType"]) {
-    if (sourceType === "youtube") {
-      void submitYouTubeImport();
-      return;
-    }
-
     if (sourceType === "package") {
       asrImportInputRef.current?.click();
       return;
@@ -1010,17 +1321,24 @@ export default function App() {
   }
 
   async function submitMediaImport() {
-    if (!mediaFile) {
+    if (!mediaFile && !mediaProbeToken) {
       postStatus("warning", "Select a media file before uploading.");
       return;
     }
 
     const formData = new FormData();
-    formData.append("media", mediaFile);
+    if (mediaProbeToken) {
+      formData.append("probeToken", mediaProbeToken);
+    } else if (mediaFile) {
+      formData.append("media", mediaFile);
+    }
     if (subtitleFile) {
       formData.append("subtitle", subtitleFile);
     }
-    formData.append("title", mediaTitle.trim() || mediaFile.name.replace(/\.[^.]+$/, ""));
+    if (!subtitleFile && selectedSubtitleStreamIndex !== "") {
+      formData.append("subtitleStreamIndex", selectedSubtitleStreamIndex);
+    }
+    formData.append("title", mediaTitle.trim() || mediaFile?.name.replace(/\.[^.]+$/, "") || "Uploaded Media");
     formData.append("source", mediaSource.trim() || "Uploaded Media");
     formData.append("language", mediaLanguage);
 
@@ -1032,6 +1350,10 @@ export default function App() {
       setMediaTitle("");
       setMediaSource("");
       setMediaLanguage(appState.importLanguage);
+      setMediaProbeToken("");
+      setMediaProbeInFlight(false);
+      setMediaSubtitleStreams([]);
+      setSelectedSubtitleStreamIndex("");
       postStatus("info", "Media import queued on the server.");
     } catch (error) {
       postStatus("error", error instanceof Error ? error.message : "Media import failed to queue.");
@@ -1071,7 +1393,7 @@ export default function App() {
 
     try {
       const response = await api.deleteTitle(titleId);
-      applyServerResponse(response);
+      applyServerResponse(response, { preserveView: true });
       postStatus("warning", `${target.title} was deleted from the library.`);
     } catch (error) {
       postStatus("error", error instanceof Error ? error.message : "Delete failed.");
@@ -1108,17 +1430,18 @@ export default function App() {
   }
 
   async function probeLanguages() {
-    if (!appState.youtubeUrl.trim()) {
+    const urls = parseYouTubeEntries(appState.youtubeUrl);
+    if (urls.length === 0) {
       postStatus("warning", "Enter a YouTube URL before probing for languages.");
       return;
     }
 
     try {
-      const response = await api.probeLanguages(appState.youtubeUrl.trim());
+      const response = await api.probeLanguages(urls[0]);
       postStatus(
         "info",
         response.languages.length > 0
-          ? `Available subtitle languages: ${response.languages.join(", ")}.`
+          ? `Available subtitle languages for the first URL: ${response.languages.join(", ")}.`
           : "No subtitle languages were reported for that YouTube title.",
       );
     } catch (error) {
@@ -1202,28 +1525,9 @@ export default function App() {
           <div className="eyebrow">yt-asr Web GUI</div>
           <h1>Sign in to resume your checked-out title.</h1>
           <p className="lede">
-            This app now signs into the real server workspace: authenticated sessions, durable drafts, background imports,
-            and server-enforced checkout rules.
+            Sign in with a server-managed account. Sessions, drafts, imports, and checkout rules are all enforced on the
+            hosted backend now.
           </p>
-
-          <div className="account-grid">
-            {DEV_ACCOUNTS.map((account) => (
-              <button
-                key={account.email}
-                className={`account-card ${loginEmail === account.email ? "selected" : ""}`}
-                onClick={() => {
-                  setLoginEmail(account.email);
-                  setLoginPassword(account.password);
-                }}
-                type="button"
-              >
-                <span className="account-role">Seeded Account</span>
-                <strong>{account.label}</strong>
-                <span>{account.email}</span>
-                <span>Password: {account.password}</span>
-              </button>
-            ))}
-          </div>
 
           <div className="login-actions">
             <label className="field">
@@ -1247,6 +1551,10 @@ export default function App() {
               {authInFlight ? "Signing In..." : "Sign In"}
             </button>
           </div>
+          <p className="helper-text">
+            Development mode still seeds local test accounts on first run. Production should use an admin-created or
+            bootstrap-admin account.
+          </p>
         </section>
 
         <section className="spec-panel">
@@ -1286,15 +1594,8 @@ export default function App() {
         <div className="toolbar-grid">
           <label className="field compact">
             <span>Workspace</span>
-            <select
-              value={appState.workspaceName}
-              onChange={(event) => updateState((current) => ({ ...current, workspaceName: event.target.value }))}
-            >
-              {WORKSPACES.map((workspace) => (
-                <option key={workspace} value={workspace}>
-                  {workspace}
-                </option>
-              ))}
+            <select value={appState.workspaceName} disabled>
+              <option value={appState.workspaceName}>{appState.workspaceName}</option>
             </select>
           </label>
           <button className="toolbar-button" onClick={reloadLibrary} type="button">
@@ -1304,7 +1605,7 @@ export default function App() {
             className="toolbar-button primary"
             onClick={() => selectedTitle && void saveTitle("manual", selectedTitle.id)}
             type="button"
-            disabled={!selectedTitle}
+            disabled={!selectedTitle || !editable || saveInFlight}
           >
             Save
           </button>
@@ -1332,9 +1633,8 @@ export default function App() {
                   }
                 }}
                 type="button"
-                disabled={view === "settings" && currentUser.role !== "admin"}
               >
-                {view === "editor" ? "Editor" : view === "shared" ? "Cloud / Library" : "Storage / Admin"}
+                {view === "editor" ? "Editor" : view === "shared" ? "Cloud / Library" : currentUser.role === "admin" ? "Account / Admin" : "Account"}
               </button>
             ))}
           </div>
@@ -1351,19 +1651,8 @@ export default function App() {
               ))}
             </select>
           </label>
-          <button className="toolbar-button" onClick={probeLanguages} type="button">
-            Probe Languages
-          </button>
-          <label className="field url-field">
-            <span>YouTube URL</span>
-            <input
-              value={appState.youtubeUrl}
-              onChange={(event) => updateState((current) => ({ ...current, youtubeUrl: event.target.value }))}
-              placeholder="https://www.youtube.com/watch?v=..."
-            />
-          </label>
-          <button className="toolbar-button primary" onClick={() => createImportedTitle("youtube")} type="button">
-            Download
+          <button className="toolbar-button primary" onClick={() => updateState((current) => ({ ...current, currentView: "shared" }))} type="button">
+            Imports
           </button>
           <button className="toolbar-button" onClick={() => createImportedTitle("local")} type="button">
             Import Media
@@ -1399,7 +1688,7 @@ export default function App() {
                   className={`title-card ${title.id === selectedTitle.id ? "active" : ""} ${
                     title.checkedOutByUserId && title.checkedOutByUserId !== currentUser.id ? "locked" : ""
                   }`}
-                  onClick={() => selectTitle(title.id)}
+                  onClick={() => void selectTitle(title.id)}
                   type="button"
                 >
                   <div className="title-card-top">
@@ -1426,7 +1715,7 @@ export default function App() {
                 </p>
               </div>
               <div className="draft-summary">
-                <span className={`pill ${editable ? "accent" : ""}`}>{selectedTitleState}</span>
+                <span className={`pill ${canEdit ? "accent" : ""}`}>{selectedTitleState}</span>
                 <span className="draft-meta">Draft v{selectedTitle.draft.version}</span>
                 <span className="draft-meta">Last sync {formatTimestamp(selectedTitle.draft.lastSyncAt)}</span>
               </div>
@@ -1437,9 +1726,9 @@ export default function App() {
                 <div className="card-header">
                   <div>
                     <span className="eyebrow">Caption Editor</span>
-                    <h3>Caption Text {editable ? "(editable)" : "(read-only)"}</h3>
+                    <h3>Caption Text {canEdit ? "(editable)" : "(read-only)"}</h3>
                   </div>
-                  <button className="toolbar-button" onClick={commitText} type="button" disabled={!editable}>
+                  <button className="toolbar-button" onClick={() => void commitText()} type="button" disabled={!canEdit}>
                     Commit Text
                   </button>
                 </div>
@@ -1447,16 +1736,18 @@ export default function App() {
                   ref={textareaRef}
                   className="caption-editor"
                   value={textDraft}
-                  readOnly={!editable}
-                  onBlur={commitText}
+                  readOnly={!canEdit}
+                  onBlur={() => void commitText()}
                   onChange={(event) => {
                     setTextDraft(event.target.value);
+                    textDraftRef.current = event.target.value;
                     setTextDraftDirty(true);
+                    textDraftDirtyRef.current = true;
                   }}
                   onKeyDown={(event) => {
                     if ((event.ctrlKey || event.metaKey) && event.key === "Enter") {
                       event.preventDefault();
-                      commitText();
+                      void commitText();
                     }
                   }}
                 />
@@ -1525,7 +1816,7 @@ export default function App() {
                         x2={clamp(regionStart, 0, waveformWidth)}
                         y1={16}
                         y2={waveformHeight - 16}
-                        className={`region-marker ${editable ? "draggable" : ""}`}
+                        className={`region-marker ${canEdit ? "draggable" : ""}`}
                         onPointerDown={(event) => {
                           event.stopPropagation();
                           startMarkerDrag("start", event.pointerId);
@@ -1536,7 +1827,7 @@ export default function App() {
                         x2={clamp(regionEnd, 0, waveformWidth)}
                         y1={16}
                         y2={waveformHeight - 16}
-                        className={`region-marker ${editable ? "draggable" : ""}`}
+                        className={`region-marker ${canEdit ? "draggable" : ""}`}
                         onPointerDown={(event) => {
                           event.stopPropagation();
                           startMarkerDrag("end", event.pointerId);
@@ -1608,7 +1899,7 @@ export default function App() {
                       <input
                         value={timingDraft.start}
                         onChange={(event) => setTimingDraft((current) => ({ ...current, start: event.target.value }))}
-                        readOnly={!editable}
+                        readOnly={!canEdit}
                       />
                     </label>
                     <label className="field">
@@ -1616,15 +1907,15 @@ export default function App() {
                       <input
                         value={timingDraft.end}
                         onChange={(event) => setTimingDraft((current) => ({ ...current, end: event.target.value }))}
-                        readOnly={!editable}
+                        readOnly={!canEdit}
                       />
                     </label>
                   </div>
                   <div className="button-row">
-                    <button className="toolbar-button primary" onClick={applyTiming} type="button" disabled={!editable}>
+                    <button className="toolbar-button primary" onClick={() => void applyTiming()} type="button" disabled={!canEdit}>
                       Apply
                     </button>
-                    <button className="toolbar-button" onClick={resetTiming} type="button" disabled={!editable}>
+                    <button className="toolbar-button" onClick={() => void resetTiming()} type="button" disabled={!canEdit}>
                       Reset Segment
                     </button>
                   </div>
@@ -1641,8 +1932,8 @@ export default function App() {
                     <input
                       type="checkbox"
                       checked={selectedPhrase?.enabled ?? false}
-                      disabled={!editable || !selectedPhrase}
-                      onChange={() => selectedPhrase && toggleFlag("enabled", selectedPhrase.id)}
+                      disabled={!canEdit || !selectedPhrase}
+                      onChange={() => selectedPhrase && void toggleFlag("enabled", selectedPhrase.id)}
                     />
                     <span>Include in export</span>
                   </label>
@@ -1650,8 +1941,8 @@ export default function App() {
                     <input
                       type="checkbox"
                       checked={selectedPhrase?.reviewed ?? false}
-                      disabled={!editable || !selectedPhrase}
-                      onChange={() => selectedPhrase && toggleFlag("reviewed", selectedPhrase.id)}
+                      disabled={!canEdit || !selectedPhrase}
+                      onChange={() => selectedPhrase && void toggleFlag("reviewed", selectedPhrase.id)}
                     />
                     <span>Reviewed</span>
                   </label>
@@ -1665,13 +1956,13 @@ export default function App() {
                     </div>
                   </div>
                   <div className="button-row stack">
-                    <button className="toolbar-button" onClick={addSentence} type="button" disabled={!editable}>
+                    <button className="toolbar-button" onClick={() => void addSentence()} type="button" disabled={!canEdit}>
                       Add Sentence
                     </button>
-                    <button className="toolbar-button" onClick={splitAtCursor} type="button" disabled={!editable}>
+                    <button className="toolbar-button" onClick={() => void splitAtCursor()} type="button" disabled={!canEdit}>
                       Split at Cursor
                     </button>
-                    <button className="toolbar-button" onClick={combineSelected} type="button" disabled={!editable}>
+                    <button className="toolbar-button" onClick={() => void combineSelected()} type="button" disabled={!canEdit}>
                       Combine Selected
                     </button>
                   </div>
@@ -1710,7 +2001,7 @@ export default function App() {
                   <button
                     key={phrase.id}
                     className={`phrase-row ${rowClass} ${selected ? "selected" : ""}`}
-                    onClick={(event) => selectPhrase(phrase.id, event.metaKey || event.ctrlKey)}
+                    onClick={(event) => void selectPhrase(phrase.id, event.metaKey || event.ctrlKey)}
                     type="button"
                   >
                     <span>{phrase.text}</span>
@@ -1720,10 +2011,10 @@ export default function App() {
                       <input
                         type="checkbox"
                         checked={phrase.enabled}
-                        disabled={!editable}
+                        disabled={!canEdit}
                         onChange={(event) => {
                           event.stopPropagation();
-                          toggleFlag("enabled", phrase.id);
+                          void toggleFlag("enabled", phrase.id);
                         }}
                       />
                     </label>
@@ -1731,10 +2022,10 @@ export default function App() {
                       <input
                         type="checkbox"
                         checked={phrase.reviewed}
-                        disabled={!editable}
+                        disabled={!canEdit}
                         onChange={(event) => {
                           event.stopPropagation();
-                          toggleFlag("reviewed", phrase.id);
+                          void toggleFlag("reviewed", phrase.id);
                         }}
                       />
                     </label>
@@ -1761,6 +2052,35 @@ export default function App() {
               </button>
             </div>
           </div>
+
+          <section className="card form-card">
+            <div className="card-header">
+              <div>
+                <span className="eyebrow">Import YouTube</span>
+                <h3>Queue One or More URLs</h3>
+              </div>
+              <div className="button-row">
+                <button className="toolbar-button" onClick={() => void probeLanguages()} type="button">
+                  Probe First URL
+                </button>
+                <button className="toolbar-button primary" onClick={() => void submitYouTubeImport()} type="button">
+                  Queue Import
+                </button>
+              </div>
+            </div>
+            <div className="settings-form single-column">
+              <label className="field">
+                <span>YouTube URLs</span>
+                <textarea
+                  className="caption-editor import-textarea"
+                  value={appState.youtubeUrl}
+                  onChange={(event) => updateState((current) => ({ ...current, youtubeUrl: event.target.value }))}
+                  placeholder="Paste one or more YouTube URLs, separated by new lines, commas, or spaces."
+                />
+              </label>
+              <div className="helper-text">Queued URLs: {parseYouTubeEntries(appState.youtubeUrl).length}</div>
+            </div>
+          </section>
 
           <section className="card form-card">
             <div className="card-header">
@@ -1796,17 +2116,51 @@ export default function App() {
                 <input
                   type="file"
                   accept="audio/*,video/*"
-                  onChange={(event) => setMediaFile(event.target.files?.[0] ?? null)}
+                  onChange={(event) => {
+                    setMediaFile(event.target.files?.[0] ?? null);
+                    setMediaProbeToken("");
+                    setMediaSubtitleStreams([]);
+                    setSelectedSubtitleStreamIndex("");
+                  }}
                 />
+              </label>
+              <label className="field">
+                <span>Embedded Subtitle Track</span>
+                <select
+                  value={selectedSubtitleStreamIndex}
+                  disabled={mediaProbeInFlight || mediaSubtitleStreams.length === 0 || Boolean(subtitleFile)}
+                  onChange={(event) => setSelectedSubtitleStreamIndex(event.target.value)}
+                >
+                  <option value="">No embedded subtitle track</option>
+                  {mediaSubtitleStreams.map((stream) => (
+                    <option key={stream.index} value={String(stream.index)}>
+                      {stream.language} / {stream.title} / {stream.codecName}
+                    </option>
+                  ))}
+                </select>
               </label>
               <label className="field">
                 <span>Subtitle File (optional)</span>
                 <input
                   type="file"
                   accept=".srt,.vtt,.json,.json3,.srv3"
-                  onChange={(event) => setSubtitleFile(event.target.files?.[0] ?? null)}
+                  onChange={(event) => {
+                    setSubtitleFile(event.target.files?.[0] ?? null);
+                    if (event.target.files?.[0]) {
+                      setSelectedSubtitleStreamIndex("");
+                    }
+                  }}
                 />
               </label>
+            </div>
+            <div className="helper-text">
+              {mediaProbeInFlight
+                ? "Inspecting the uploaded media for embedded subtitle tracks..."
+                : mediaSubtitleStreams.length > 0
+                  ? `${mediaSubtitleStreams.length} embedded subtitle track${mediaSubtitleStreams.length === 1 ? "" : "s"} found.`
+                  : mediaFile
+                    ? "No embedded subtitle tracks were detected, or the probe has not completed yet."
+                    : "Choose a media file to detect embedded subtitle tracks automatically."}
             </div>
           </section>
 
@@ -1919,20 +2273,12 @@ export default function App() {
           </div>
         </section>
       ) : null}
-      {appState.currentView === "settings" && currentUser.role === "admin" ? (
+      {appState.currentView === "settings" ? (
         <section className="view-panel">
           <div className="panel-header">
             <div>
-              <span className="eyebrow">Admin Settings</span>
-              <h2>Storage Configuration</h2>
-            </div>
-            <div className="button-row">
-              <button className="toolbar-button" onClick={() => void saveStorageConfig()} type="button">
-                Save Settings
-              </button>
-              <button className="toolbar-button primary" onClick={() => void testStorage()} type="button">
-                Test Connection
-              </button>
+              <span className="eyebrow">{currentUser.role === "admin" ? "Admin Settings" : "Account Settings"}</span>
+              <h2>{currentUser.role === "admin" ? "Accounts and Storage" : "Account"}</h2>
             </div>
           </div>
 
@@ -1940,78 +2286,53 @@ export default function App() {
             <section className="card form-card">
               <div className="card-header">
                 <div>
-                  <span className="eyebrow">Provider</span>
-                  <h3>S3-Compatible Preset</h3>
+                  <span className="eyebrow">Your Account</span>
+                  <h3>Password and Session Settings</h3>
                 </div>
               </div>
               <div className="settings-form">
                 <label className="field">
-                  <span>Provider preset</span>
-                  <select
-                    value={appState.storage.provider}
-                    onChange={(event) => updateStorage("provider", event.target.value as StorageProvider)}
-                  >
-                    {["Local Disk", "Backblaze B2", "Amazon S3", "Cloudflare R2", "MinIO"].map((provider) => (
-                      <option key={provider} value={provider}>
-                        {provider}
-                      </option>
-                    ))}
-                  </select>
+                  <span>Display name</span>
+                  <input value={currentUser.displayName} readOnly />
                 </label>
                 <label className="field">
-                  <span>Bucket</span>
-                  <input value={appState.storage.bucket} onChange={(event) => updateStorage("bucket", event.target.value)} />
+                  <span>Email</span>
+                  <input value={currentUser.email} readOnly />
                 </label>
                 <label className="field">
-                  <span>Prefix</span>
-                  <input value={appState.storage.prefix} onChange={(event) => updateStorage("prefix", event.target.value)} />
-                </label>
-                <label className="field">
-                  <span>Endpoint URL</span>
-                  <input
-                    value={appState.storage.endpointUrl}
-                    onChange={(event) => updateStorage("endpointUrl", event.target.value)}
-                  />
-                </label>
-                <label className="field">
-                  <span>Region</span>
-                  <input value={appState.storage.region} onChange={(event) => updateStorage("region", event.target.value)} />
-                </label>
-                <label className="field">
-                  <span>Addressing mode</span>
-                  <select
-                    value={appState.storage.addressingMode}
-                    onChange={(event) => updateStorage("addressingMode", event.target.value)}
-                  >
-                    <option value="path">Path</option>
-                    <option value="virtual-hosted">Virtual hosted</option>
-                  </select>
-                </label>
-                <label className="check-field">
-                  <input
-                    type="checkbox"
-                    checked={appState.storage.auditVisible}
-                    onChange={(event) => updateStorage("auditVisible", event.target.checked)}
-                  />
-                  <span>Audit visibility enabled</span>
-                </label>
-                <label className="field">
-                  <span>Access key ID</span>
-                  <input
-                    value={storageAccessKeyId}
-                    onChange={(event) => setStorageAccessKeyId(event.target.value)}
-                    placeholder="Leave blank to keep current server secret"
-                  />
-                </label>
-                <label className="field">
-                  <span>Secret access key</span>
+                  <span>Current password</span>
                   <input
                     type="password"
-                    value={storageSecretAccessKey}
-                    onChange={(event) => setStorageSecretAccessKey(event.target.value)}
-                    placeholder="Leave blank to keep current server secret"
+                    value={passwordForm.currentPassword}
+                    onChange={(event) => setPasswordForm((current) => ({ ...current, currentPassword: event.target.value }))}
                   />
                 </label>
+                <label className="field">
+                  <span>New password</span>
+                  <input
+                    type="password"
+                    value={passwordForm.nextPassword}
+                    onChange={(event) => setPasswordForm((current) => ({ ...current, nextPassword: event.target.value }))}
+                  />
+                </label>
+                <label className="field">
+                  <span>Confirm new password</span>
+                  <input
+                    type="password"
+                    value={passwordForm.confirmPassword}
+                    onChange={(event) => setPasswordForm((current) => ({ ...current, confirmPassword: event.target.value }))}
+                  />
+                </label>
+              </div>
+              {currentUser.mustChangePassword ? (
+                <div className="settings-note warning-note">
+                  This account is marked to change its password before continuing normal work.
+                </div>
+              ) : null}
+              <div className="button-row">
+                <button className="toolbar-button primary" onClick={() => void submitPasswordChange()} type="button">
+                  Change Password
+                </button>
               </div>
             </section>
 
@@ -2023,12 +2344,255 @@ export default function App() {
                 </div>
               </div>
               <ul className="rule-list">
+                <li>Disabled accounts can no longer restore sessions from old cookies.</li>
                 <li>Users never see access key IDs or secret keys in the browser UI.</li>
                 <li>The browser talks only to the application API, not directly to object storage.</li>
-                <li>Short-lived signed URLs can be added later without exposing raw credentials.</li>
+                <li>Important editor commits now save to the server draft immediately.</li>
               </ul>
-              <div className="settings-note">Last connection test: {formatTimestamp(appState.storage.lastConnectionTestAt)}</div>
+              <div className="settings-note">Last sign-in: {formatTimestamp(currentUser.lastLoginAt)}</div>
             </section>
+
+            {currentUser.role === "admin" ? (
+              <section className="card form-card span-two">
+                <div className="card-header">
+                  <div>
+                    <span className="eyebrow">User Management</span>
+                    <h3>Create and Maintain Accounts</h3>
+                  </div>
+                  <button className="toolbar-button primary" onClick={() => void submitCreateUser()} type="button">
+                    Create User
+                  </button>
+                </div>
+
+                <div className="settings-form">
+                  <label className="field">
+                    <span>Email</span>
+                    <input
+                      value={createUserForm.email}
+                      onChange={(event) => setCreateUserForm((current) => ({ ...current, email: event.target.value }))}
+                    />
+                  </label>
+                  <label className="field">
+                    <span>Display name</span>
+                    <input
+                      value={createUserForm.displayName}
+                      onChange={(event) => setCreateUserForm((current) => ({ ...current, displayName: event.target.value }))}
+                    />
+                  </label>
+                  <label className="field">
+                    <span>Temporary password</span>
+                    <input
+                      type="password"
+                      value={createUserForm.password}
+                      onChange={(event) => setCreateUserForm((current) => ({ ...current, password: event.target.value }))}
+                    />
+                  </label>
+                  <label className="field">
+                    <span>Role</span>
+                    <select
+                      value={createUserForm.role}
+                      onChange={(event) => setCreateUserForm((current) => ({ ...current, role: event.target.value as Role }))}
+                    >
+                      <option value="user">User</option>
+                      <option value="admin">Admin</option>
+                    </select>
+                  </label>
+                  <label className="field">
+                    <span>Status</span>
+                    <select
+                      value={createUserForm.status}
+                      onChange={(event) => setCreateUserForm((current) => ({ ...current, status: event.target.value as UserStatus }))}
+                    >
+                      <option value="active">Active</option>
+                      <option value="disabled">Disabled</option>
+                    </select>
+                  </label>
+                  <label className="check-field">
+                    <input
+                      type="checkbox"
+                      checked={createUserForm.mustChangePassword}
+                      onChange={(event) => setCreateUserForm((current) => ({ ...current, mustChangePassword: event.target.checked }))}
+                    />
+                    <span>Require password change at first sign-in</span>
+                  </label>
+                </div>
+
+                <div className="user-admin-grid">
+                  {appState.users.map((user) => {
+                    const draft = userDrafts[user.id];
+                    if (!draft) {
+                      return null;
+                    }
+                    return (
+                      <article className="audit-item user-admin-card" key={user.id}>
+                        <div className="audit-top">
+                          <strong>{user.displayName}</strong>
+                          <span>{user.role}</span>
+                        </div>
+                        <span>{user.email}</span>
+                        <div className="settings-form">
+                          <label className="field">
+                            <span>Display name</span>
+                            <input
+                              value={draft.displayName}
+                              onChange={(event) =>
+                                updateUserDraft(user.id, (current) => ({ ...current, displayName: event.target.value }))
+                              }
+                            />
+                          </label>
+                          <label className="field">
+                            <span>Role</span>
+                            <select
+                              value={draft.role}
+                              onChange={(event) =>
+                                updateUserDraft(user.id, (current) => ({ ...current, role: event.target.value as Role }))
+                              }
+                            >
+                              <option value="user">User</option>
+                              <option value="admin">Admin</option>
+                            </select>
+                          </label>
+                          <label className="field">
+                            <span>Status</span>
+                            <select
+                              value={draft.status}
+                              onChange={(event) =>
+                                updateUserDraft(user.id, (current) => ({ ...current, status: event.target.value as UserStatus }))
+                              }
+                            >
+                              <option value="active">Active</option>
+                              <option value="disabled">Disabled</option>
+                            </select>
+                          </label>
+                          <label className="field">
+                            <span>Reset password</span>
+                            <input
+                              type="password"
+                              value={draft.resetPassword}
+                              onChange={(event) =>
+                                updateUserDraft(user.id, (current) => ({ ...current, resetPassword: event.target.value }))
+                              }
+                              placeholder="Leave blank to keep current password"
+                            />
+                          </label>
+                          <label className="check-field">
+                            <input
+                              type="checkbox"
+                              checked={draft.mustChangePassword}
+                              onChange={(event) =>
+                                updateUserDraft(user.id, (current) => ({ ...current, mustChangePassword: event.target.checked }))
+                              }
+                            />
+                            <span>Require password change after reset</span>
+                          </label>
+                        </div>
+                        <div className="button-row">
+                          <button className="toolbar-button" onClick={() => void saveManagedUser(user.id)} type="button">
+                            Save User
+                          </button>
+                          <button className="toolbar-button primary" onClick={() => void resetManagedUserPassword(user.id)} type="button">
+                            Reset Password
+                          </button>
+                        </div>
+                        <div className="settings-note">
+                          Last sign-in {formatTimestamp(user.lastLoginAt)} / created {formatTimestamp(user.createdAt)} /
+                          updated {formatTimestamp(user.updatedAt)}
+                        </div>
+                      </article>
+                    );
+                  })}
+                </div>
+              </section>
+            ) : null}
+
+            {currentUser.role === "admin" ? (
+              <section className="card form-card span-two">
+                <div className="card-header">
+                  <div>
+                    <span className="eyebrow">Provider</span>
+                    <h3>S3-Compatible Preset</h3>
+                  </div>
+                  <div className="button-row">
+                    <button className="toolbar-button" onClick={() => void saveStorageConfig()} type="button">
+                      Save Settings
+                    </button>
+                    <button className="toolbar-button primary" onClick={() => void testStorage()} type="button">
+                      Test Connection
+                    </button>
+                  </div>
+                </div>
+                <div className="settings-form">
+                  <label className="field">
+                    <span>Provider preset</span>
+                    <select
+                      value={appState.storage.provider}
+                      onChange={(event) => updateStorage("provider", event.target.value as StorageProvider)}
+                    >
+                      {["Local Disk", "Backblaze B2", "Amazon S3", "Cloudflare R2", "MinIO"].map((provider) => (
+                        <option key={provider} value={provider}>
+                          {provider}
+                        </option>
+                      ))}
+                    </select>
+                  </label>
+                  <label className="field">
+                    <span>Bucket</span>
+                    <input value={appState.storage.bucket} onChange={(event) => updateStorage("bucket", event.target.value)} />
+                  </label>
+                  <label className="field">
+                    <span>Prefix</span>
+                    <input value={appState.storage.prefix} onChange={(event) => updateStorage("prefix", event.target.value)} />
+                  </label>
+                  <label className="field">
+                    <span>Endpoint URL</span>
+                    <input
+                      value={appState.storage.endpointUrl}
+                      onChange={(event) => updateStorage("endpointUrl", event.target.value)}
+                    />
+                  </label>
+                  <label className="field">
+                    <span>Region</span>
+                    <input value={appState.storage.region} onChange={(event) => updateStorage("region", event.target.value)} />
+                  </label>
+                  <label className="field">
+                    <span>Addressing mode</span>
+                    <select
+                      value={appState.storage.addressingMode}
+                      onChange={(event) => updateStorage("addressingMode", event.target.value)}
+                    >
+                      <option value="path">Path</option>
+                      <option value="virtual-hosted">Virtual hosted</option>
+                    </select>
+                  </label>
+                  <label className="check-field">
+                    <input
+                      type="checkbox"
+                      checked={appState.storage.auditVisible}
+                      onChange={(event) => updateStorage("auditVisible", event.target.checked)}
+                    />
+                    <span>Audit visibility enabled</span>
+                  </label>
+                  <label className="field">
+                    <span>Access key ID</span>
+                    <input
+                      value={storageAccessKeyId}
+                      onChange={(event) => setStorageAccessKeyId(event.target.value)}
+                      placeholder="Leave blank to keep current server secret"
+                    />
+                  </label>
+                  <label className="field">
+                    <span>Secret access key</span>
+                    <input
+                      type="password"
+                      value={storageSecretAccessKey}
+                      onChange={(event) => setStorageSecretAccessKey(event.target.value)}
+                      placeholder="Leave blank to keep current server secret"
+                    />
+                  </label>
+                </div>
+                <div className="settings-note">Last connection test: {formatTimestamp(appState.storage.lastConnectionTestAt)}</div>
+              </section>
+            ) : null}
           </div>
         </section>
       ) : null}
