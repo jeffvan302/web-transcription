@@ -191,6 +191,7 @@ export default function App() {
   const selectedManagedUserDraft = selectedManagedUser ? userDrafts[selectedManagedUser.id] ?? null : null;
   const editable = Boolean(currentUser && selectedTitle?.checkedOutByUserId === currentUser.id);
   const canEdit = editable && !saveInFlight && !passwordChangeRequired;
+  const activeCheckedOutTitleId = appState.titles.find((title) => title.checkedOutByUserId === currentUser?.id)?.id ?? null;
   const viewRange = selectedTitle ? selectedTitle.duration / waveZoom : 10;
   const visibleStart = clamp(wavePan, 0, Math.max(0, (selectedTitle?.duration ?? 0) - viewRange));
   const visibleEnd = visibleStart + viewRange;
@@ -846,6 +847,44 @@ export default function App() {
       return `Locked by ${owner?.displayName ?? "Unknown user"} (read-only)`;
     }
     return "Checked in (read-only)";
+  }
+
+  function canCheckoutTitle(title: TitleRecord) {
+    if (!currentUser || passwordChangeRequired) {
+      return false;
+    }
+    if (title.checkedOutByUserId && title.checkedOutByUserId !== currentUser.id) {
+      return false;
+    }
+    if (activeCheckedOutTitleId && activeCheckedOutTitleId !== title.id) {
+      return false;
+    }
+    return title.checkedOutByUserId !== currentUser.id;
+  }
+
+  function canSyncTitle(title: TitleRecord) {
+    return Boolean(currentUser && !passwordChangeRequired && title.checkedOutByUserId === currentUser.id);
+  }
+
+  function canCheckInTitle(title: TitleRecord) {
+    return Boolean(currentUser && !passwordChangeRequired && title.checkedOutByUserId === currentUser.id);
+  }
+
+  function canForceCheckInTitle(title: TitleRecord) {
+    return Boolean(currentUser?.role === "admin" && title.checkedOutByUserId);
+  }
+
+  function canTakeOverTitle(title: TitleRecord) {
+    if (currentUser?.role !== "admin" || passwordChangeRequired) {
+      return false;
+    }
+    if (title.checkedOutByUserId === currentUser.id) {
+      return false;
+    }
+    if (activeCheckedOutTitleId && activeCheckedOutTitleId !== title.id) {
+      return false;
+    }
+    return true;
   }
 
   async function login() {
@@ -2219,24 +2258,39 @@ export default function App() {
                 <span>{formatTimestamp(title.uploadedAt)}</span>
                 <span>{getTitleStateLabel(title)}</span>
                 <div className="action-cluster">
-                  <button className="toolbar-button" onClick={() => checkout(title.id)} type="button">
-                    Check Out
+                  <button
+                    className="toolbar-button"
+                    onClick={() => void checkout(title.id)}
+                    type="button"
+                    disabled={!canCheckoutTitle(title)}
+                  >
+                    {title.checkedOutByUserId === currentUser?.id ? "Checked Out" : "Check Out"}
                   </button>
-                  <button className="toolbar-button" onClick={() => void sync(title.id)} type="button">
+                  <button className="toolbar-button" onClick={() => void sync(title.id)} type="button" disabled={!canSyncTitle(title)}>
                     Sync Checked Out
                   </button>
-                  <button className="toolbar-button" onClick={() => void checkIn(title.id)} type="button">
+                  <button className="toolbar-button" onClick={() => void checkIn(title.id)} type="button" disabled={!canCheckInTitle(title)}>
                     Check In
                   </button>
                   {currentUser.role === "admin" ? (
                     <>
-                      <button className="toolbar-button" onClick={() => forceCheckIn(title.id)} type="button">
+                      <button
+                        className="toolbar-button"
+                        onClick={() => void forceCheckIn(title.id)}
+                        type="button"
+                        disabled={!canForceCheckInTitle(title)}
+                      >
                         Admin Force Check In
                       </button>
-                      <button className="toolbar-button" onClick={() => takeOver(title.id)} type="button">
+                      <button
+                        className="toolbar-button"
+                        onClick={() => void takeOver(title.id)}
+                        type="button"
+                        disabled={!canTakeOverTitle(title)}
+                      >
                         Admin Take Over
                       </button>
-                      <button className="toolbar-button danger" onClick={() => deleteTitle(title.id)} type="button">
+                      <button className="toolbar-button danger" onClick={() => void deleteTitle(title.id)} type="button">
                         Delete from Cloud
                       </button>
                     </>
