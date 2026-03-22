@@ -113,27 +113,19 @@ function parseYouTubeEntries(value: string) {
   ];
 }
 
-const MIN_WAVE_VISIBLE_SECONDS = 1.5;
-const MAX_DEFAULT_WAVE_VISIBLE_SECONDS = 24;
+const MIN_WAVE_WINDOW_SECONDS = 1;
+const MAX_WAVE_WINDOW_SECONDS = 45;
 
 function getWaveMinVisibleRange(duration: number) {
-  return duration > 0 ? Math.min(MIN_WAVE_VISIBLE_SECONDS, duration) : MIN_WAVE_VISIBLE_SECONDS;
+  return duration > 0 ? Math.min(MIN_WAVE_WINDOW_SECONDS, duration) : MIN_WAVE_WINDOW_SECONDS;
 }
 
-function getWaveViewRange(duration: number, zoom: number) {
+function getWaveViewRange(duration: number, requestedWindow: number) {
   if (!duration || duration <= 0) {
     return 10;
   }
 
-  return clamp(duration / Math.max(zoom, 1), getWaveMinVisibleRange(duration), duration);
-}
-
-function getMaxWaveZoom(duration: number) {
-  if (!duration || duration <= 0) {
-    return 1;
-  }
-
-  return Math.max(1, duration / getWaveMinVisibleRange(duration));
+  return clamp(requestedWindow, getWaveMinVisibleRange(duration), Math.min(MAX_WAVE_WINDOW_SECONDS, duration));
 }
 
 function getDefaultWaveViewRange(duration: number, phrase: Phrase | null) {
@@ -142,8 +134,8 @@ function getDefaultWaveViewRange(duration: number, phrase: Phrase | null) {
   }
 
   const phraseDuration = phrase ? Math.max(phrase.end - phrase.start, 0.75) : 3;
-  const minRange = Math.min(duration, 8);
-  const maxRange = Math.min(duration, MAX_DEFAULT_WAVE_VISIBLE_SECONDS);
+  const minRange = Math.min(duration, 6);
+  const maxRange = Math.min(duration, MAX_WAVE_WINDOW_SECONDS);
   return clamp(phraseDuration * 6, minRange, maxRange);
 }
 
@@ -284,7 +276,7 @@ export default function App() {
   const [playheadTime, setPlayheadTime] = useState<number | null>(null);
   const [textDraft, setTextDraft] = useState("");
   const [textDraftDirty, setTextDraftDirty] = useState(false);
-  const [waveZoom, setWaveZoom] = useState(1);
+  const [waveWindowSeconds, setWaveWindowSeconds] = useState(12);
   const [wavePan, setWavePan] = useState(0);
   const [dragState, setDragState] = useState<DragState>(null);
   const [timingDraft, setTimingDraft] = useState({ start: "0.00", end: "0.00" });
@@ -347,7 +339,7 @@ export default function App() {
   const editable = Boolean(currentUser && selectedTitle?.checkedOutByUserId === currentUser.id);
   const canEdit = editable && !saveInFlight && !passwordChangeRequired;
   const activeCheckedOutTitleId = appState.titles.find((title) => title.checkedOutByUserId === currentUser?.id)?.id ?? null;
-  const viewRange = selectedTitle ? getWaveViewRange(selectedTitle.duration, waveZoom) : 10;
+  const viewRange = selectedTitle ? getWaveViewRange(selectedTitle.duration, waveWindowSeconds) : 10;
   const visibleStart = clamp(wavePan, 0, Math.max(0, (selectedTitle?.duration ?? 0) - viewRange));
   const visibleEnd = visibleStart + viewRange;
 
@@ -457,7 +449,7 @@ export default function App() {
 
   useEffect(() => {
     if (!selectedTitle) {
-      setWaveZoom(1);
+      setWaveWindowSeconds(12);
       setWavePan(0);
       return;
     }
@@ -465,7 +457,7 @@ export default function App() {
     const nextViewRange = getDefaultWaveViewRange(selectedTitle.duration, selectedPhrase);
     const focusTime = selectedPhrase ? (selectedPhrase.start + selectedPhrase.end) / 2 : nextViewRange / 2;
 
-    setWaveZoom(clamp(selectedTitle.duration / nextViewRange, 1, getMaxWaveZoom(selectedTitle.duration)));
+    setWaveWindowSeconds(nextViewRange);
     setWavePan(centerWavePan(selectedTitle.duration, nextViewRange, focusTime));
   }, [selectedTitle?.id]);
 
@@ -867,9 +859,18 @@ export default function App() {
     }));
   }
 
-  function applyServerResponse(response: AppStateResponse, options: { preserveView?: boolean } = {}) {
+  function applyServerResponse(
+    response: AppStateResponse,
+    options: { preserveView?: boolean; preserveSelection?: boolean } = {},
+  ) {
     const current = appStateRef.current;
     const sessionUser = response.state.users.find((user) => user.id === response.state.sessionUserId) ?? null;
+    const preservedTitle = options.preserveSelection
+      ? response.state.titles.find((title) => title.id === current.selectedTitleId) ?? null
+      : null;
+    const preservedPhraseIds = preservedTitle
+      ? current.selectedPhraseIds.filter((phraseId) => preservedTitle.phrases.some((phrase) => phrase.id === phraseId))
+      : [];
     const nextState: PersistedState = {
       ...response.state,
       currentView: sessionUser?.mustChangePassword
@@ -877,6 +878,13 @@ export default function App() {
         : options.preserveView
           ? current.currentView
           : response.state.currentView,
+      selectedTitleId: preservedTitle?.id || response.state.selectedTitleId,
+      selectedPhraseIds:
+        preservedPhraseIds.length > 0
+          ? preservedPhraseIds
+          : preservedTitle?.phrases[0]
+            ? [preservedTitle.phrases[0].id]
+            : response.state.selectedPhraseIds,
       youtubeUrl: current.youtubeUrl,
       importLanguage: current.importLanguage || response.state.importLanguage,
     };
@@ -951,7 +959,7 @@ export default function App() {
 
     try {
       const response = await api.getState();
-      applyServerResponse(response, { preserveView: true });
+      applyServerResponse(response, { preserveView: true, preserveSelection: true });
       if (showStatus) {
         postStatus("info", "Library metadata refreshed from the server.");
       }
@@ -998,7 +1006,7 @@ export default function App() {
         ...title,
         savedSnapshot: clonePhrases(title.phrases),
       });
-      applyServerResponse(response, { preserveView: true });
+      applyServerResponse(response, { preserveView: true, preserveSelection: true });
       if (appStateRef.current.selectedTitleId === titleId) {
         setTextDraftDirty(false);
         textDraftDirtyRef.current = false;
@@ -1299,22 +1307,17 @@ export default function App() {
     }
   }
 
-  function zoomWave(direction: "in" | "out", focusTime?: number) {
+  function updateWaveWindow(windowSeconds: number, focusTime?: number) {
     if (!selectedTitle) {
       return;
     }
 
-    const nextZoom = clamp(
-      waveZoom * (direction === "in" ? 1.35 : 1 / 1.35),
-      1,
-      getMaxWaveZoom(selectedTitle.duration),
-    );
+    const nextViewRange = getWaveViewRange(selectedTitle.duration, windowSeconds);
     const focus =
       focusTime ?? (selectedPhrase ? (selectedPhrase.start + selectedPhrase.end) / 2 : visibleStart + viewRange / 2);
     const anchorRatio = viewRange > 0 ? clamp((focus - visibleStart) / viewRange, 0, 1) : 0.5;
-    const nextViewRange = getWaveViewRange(selectedTitle.duration, nextZoom);
 
-    setWaveZoom(nextZoom);
+    setWaveWindowSeconds(nextViewRange);
     setWavePan(
       clamp(focus - anchorRatio * nextViewRange, 0, Math.max(0, selectedTitle.duration - nextViewRange)),
     );
@@ -2021,6 +2024,10 @@ export default function App() {
   const waveformImageX =
     selectedTitle && selectedTitle.duration > 0 ? -((visibleStart / selectedTitle.duration) * waveformImageWidth) : 0;
   const waveformClipId = "editor-waveform-clip";
+  const waveWindowSliderMin = selectedTitle ? getWaveMinVisibleRange(selectedTitle.duration) : MIN_WAVE_WINDOW_SECONDS;
+  const waveWindowSliderMax = selectedTitle
+    ? Math.min(MAX_WAVE_WINDOW_SECONDS, Math.max(waveWindowSliderMin, selectedTitle.duration))
+    : MAX_WAVE_WINDOW_SECONDS;
 
   if (loadingState) {
     return (
@@ -2334,14 +2341,17 @@ export default function App() {
                     <span className="eyebrow">Waveform</span>
                     <h3>Phrase Timing Editor</h3>
                   </div>
-                  <div className="button-row">
-                    <button className="toolbar-button" onClick={() => zoomWave("out")} type="button">
-                      Zoom Out
-                    </button>
-                    <button className="toolbar-button" onClick={() => zoomWave("in")} type="button">
-                      Zoom In
-                    </button>
-                  </div>
+                  <label className="field compact waveform-zoom-field">
+                    <span>Visible time {viewRange.toFixed(1)}s</span>
+                    <input
+                      type="range"
+                      min={waveWindowSliderMin}
+                      max={waveWindowSliderMax}
+                      step="0.5"
+                      value={viewRange}
+                      onChange={(event) => updateWaveWindow(Number(event.target.value))}
+                    />
+                  </label>
                 </div>
 
                 <svg
@@ -2349,12 +2359,6 @@ export default function App() {
                   className="waveform"
                   viewBox={`0 0 ${waveformWidth} ${waveformHeight}`}
                   onPointerDown={(event) => startPan(event.pointerId, event.clientX)}
-                  onWheel={(event) => {
-                    event.preventDefault();
-                    const bounds = waveformRef.current?.getBoundingClientRect();
-                    const ratio = bounds ? clamp((event.clientX - bounds.left) / bounds.width, 0, 1) : 0.5;
-                    zoomWave(event.deltaY > 0 ? "out" : "in", visibleStart + ratio * viewRange);
-                  }}
                   role="img"
                   aria-label="Waveform editor"
                 >
@@ -2429,7 +2433,7 @@ export default function App() {
 
                 <div className="waveform-footer">
                   <span>Visible range: {formatTime(visibleStart)} to {formatTime(visibleEnd)}</span>
-                  <span>Mouse wheel zoom, drag the background to pan, drag markers to retime, play always runs the selected phrase bounds.</span>
+                  <span>Drag the background to pan, drag markers to retime, and use the slider to choose a 1 to 45 second window.</span>
                 </div>
               </section>
 

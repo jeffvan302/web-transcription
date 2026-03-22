@@ -341,6 +341,10 @@ h3 {
   color: var(--muted);
 }
 
+.waveform-zoom-field {
+  min-width: 220px;
+}
+
 .workspace-grid {
   position: relative;
   z-index: 1;
