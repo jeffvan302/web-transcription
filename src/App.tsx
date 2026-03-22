@@ -855,11 +855,9 @@ export default function App() {
   }
 
   function updateState(updater: (current: PersistedState) => PersistedState) {
-    setAppState((current) => {
-      const next = updater(current);
-      appStateRef.current = next;
-      return next;
-    });
+    const next = updater(appStateRef.current);
+    appStateRef.current = next;
+    setAppState(next);
   }
 
   function updateTitle(titleId: string, updater: (title: TitleRecord) => TitleRecord) {
@@ -1572,33 +1570,51 @@ export default function App() {
       return;
     }
 
-    const currentIndex = selectedPhrase
-      ? selectedTitle.phrases.findIndex((phrase) => phrase.id === selectedPhrase.id)
-      : selectedTitle.phrases.length - 1;
-    const currentPhrase = selectedPhrase;
-    const nextPhrase = selectedTitle.phrases[currentIndex + 1];
+    await commitText({ persist: false });
+
+    const currentState = appStateRef.current;
+    const currentTitle = currentState.titles.find((title) => title.id === selectedTitle.id);
+    const currentPhraseId = currentState.selectedPhraseIds[0] ?? null;
+    const currentPhrase = currentTitle?.phrases.find((phrase) => phrase.id === currentPhraseId) ?? null;
+    if (!currentTitle) {
+      return;
+    }
+
+    const currentIndex = currentPhrase
+      ? currentTitle.phrases.findIndex((phrase) => phrase.id === currentPhrase.id)
+      : currentTitle.phrases.length - 1;
+    const nextPhrase = currentTitle.phrases[currentIndex + 1];
     const start = currentPhrase ? currentPhrase.end : 0;
-    const provisionalEnd = nextPhrase ? nextPhrase.start : Math.min(selectedTitle.duration, start + 2.4);
+    const provisionalEnd = nextPhrase ? nextPhrase.start : Math.min(currentTitle.duration, start + 2.4);
     const newPhrase: Phrase = {
       id: makeId("phrase"),
       start: Number(start.toFixed(2)),
-      end: Number(clamp(Math.max(start + 0.8, provisionalEnd), start + 0.8, selectedTitle.duration).toFixed(2)),
+      end: Number(clamp(Math.max(start + 0.8, provisionalEnd), start + 0.8, currentTitle.duration).toFixed(2)),
       text: "<Sentence>",
       enabled: true,
       reviewed: false,
     };
 
-    updateTitle(selectedTitle.id, (title) => {
+    updateTitle(currentTitle.id, (title) => {
       const phrases = [...title.phrases];
       phrases.splice(currentIndex + 1, 0, newPhrase);
       return { ...title, phrases, draft: { ...title.draft, isDirty: true } };
     });
     updateState((current) => ({ ...current, selectedPhraseIds: [newPhrase.id] }));
-    await saveTitle("manual", selectedTitle.id, "Added a new sentence and selected it for editing.");
+    await saveTitle("manual", currentTitle.id, "Added a new sentence and selected it for editing.");
   }
 
   async function splitAtCursor() {
     if (!selectedTitle || !selectedPhrase || !canEdit || !textareaRef.current) {
+      return;
+    }
+
+    await commitText({ persist: false });
+
+    const currentState = appStateRef.current;
+    const currentTitle = currentState.titles.find((title) => title.id === selectedTitle.id);
+    const currentPhrase = currentTitle?.phrases.find((phrase) => phrase.id === selectedPhrase.id);
+    if (!currentTitle || !currentPhrase) {
       return;
     }
 
@@ -1615,25 +1631,25 @@ export default function App() {
       return;
     }
 
-    const midpoint = Number(((selectedPhrase.start + selectedPhrase.end) / 2).toFixed(2));
-    const leftPhrase: Phrase = { ...selectedPhrase, text: leftText, end: midpoint, reviewed: true };
+    const midpoint = Number(((currentPhrase.start + currentPhrase.end) / 2).toFixed(2));
+    const leftPhrase: Phrase = { ...currentPhrase, text: leftText, end: midpoint, reviewed: true };
     const rightPhrase: Phrase = {
-      ...selectedPhrase,
+      ...currentPhrase,
       id: makeId("phrase"),
       text: rightText,
       start: midpoint,
       reviewed: true,
     };
 
-    updateTitle(selectedTitle.id, (title) => ({
+    updateTitle(currentTitle.id, (title) => ({
       ...title,
       phrases: title.phrases.flatMap((phrase) =>
-        phrase.id === selectedPhrase.id ? [leftPhrase, rightPhrase] : [phrase],
+        phrase.id === currentPhrase.id ? [leftPhrase, rightPhrase] : [phrase],
       ),
       draft: { ...title.draft, isDirty: true },
     }));
     updateState((current) => ({ ...current, selectedPhraseIds: [leftPhrase.id, rightPhrase.id] }));
-    await saveTitle("manual", selectedTitle.id, "Split the selected phrase at the current text cursor.");
+    await saveTitle("manual", currentTitle.id, "Split the selected phrase at the current text cursor.");
   }
 
   async function combineSelected() {
@@ -1642,9 +1658,17 @@ export default function App() {
       return;
     }
 
-    const selectedEntries = selectedTitle.phrases
+    await commitText({ persist: false });
+
+    const currentState = appStateRef.current;
+    const currentTitle = currentState.titles.find((title) => title.id === selectedTitle.id);
+    if (!currentTitle) {
+      return;
+    }
+
+    const selectedEntries = currentTitle.phrases
       .map((phrase, index) => ({ phrase, index }))
-      .filter(({ phrase }) => appStateRef.current.selectedPhraseIds.includes(phrase.id));
+      .filter(({ phrase }) => currentState.selectedPhraseIds.includes(phrase.id));
 
     const contiguous = selectedEntries.every((entry, index, list) => index === 0 || entry.index === list[index - 1].index + 1);
     if (!contiguous) {
@@ -1662,7 +1686,7 @@ export default function App() {
     };
     const targetIds = new Set(selectedEntries.map(({ phrase }) => phrase.id));
 
-    updateTitle(selectedTitle.id, (title) => {
+    updateTitle(currentTitle.id, (title) => {
       const phrases: Phrase[] = [];
       title.phrases.forEach((phrase) => {
         if (!targetIds.has(phrase.id)) {
@@ -1676,7 +1700,7 @@ export default function App() {
       return { ...title, phrases, draft: { ...title.draft, isDirty: true } };
     });
     updateState((current) => ({ ...current, selectedPhraseIds: [merged.id] }));
-    await saveTitle("manual", selectedTitle.id, "Combined the selected adjacent phrases.");
+    await saveTitle("manual", currentTitle.id, "Combined the selected adjacent phrases.");
   }
 
   async function checkout(titleId: string) {
