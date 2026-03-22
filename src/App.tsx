@@ -2041,7 +2041,7 @@ export default function App() {
   const selectedTitleState = selectedTitle ? getTitleStateLabel(selectedTitle) : "No title";
   const headerSuffix = selectedTitle ? getTitleHeaderSuffix(selectedTitle) : "";
   const waveformWidth = 760;
-  const waveformHeight = 160;
+  const waveformHeight = 180;
   const regionStart =
     selectedPhrase && selectedTitle ? ((selectedPhrase.start - visibleStart) / viewRange) * waveformWidth : 0;
   const regionEnd =

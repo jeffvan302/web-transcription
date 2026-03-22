@@ -95,12 +95,17 @@ export async function extractWorkingAudio(inputPath, outputPath) {
 
 export async function generateWaveform(audioPath, outputPath) {
   ensureDir(path.dirname(outputPath));
+  const duration = Math.max(1, await getMediaDuration(audioPath));
+  const pixelsPerSecond = duration <= 180 ? 70 : duration <= 900 ? 40 : 24;
+  const width = Math.min(12000, Math.max(3200, Math.round(duration * pixelsPerSecond)));
+  const height = 320;
+
   await runProcess(appConfig.ffmpegPath, [
     "-y",
     "-i",
     audioPath,
     "-filter_complex",
-    "showwavespic=s=1600x240:colors=0x6db5ff",
+    `showwavespic=s=${width}x${height}:colors=0x6db5ff:filter=peak:draw=full:scale=sqrt`,
     "-frames:v",
     "1",
     outputPath,
