@@ -550,6 +550,16 @@ h3 {
   gap: 0.55rem;
 }
 
+.cloud-list-toolbar {
+  display: grid;
+  gap: 0.75rem;
+  margin-bottom: 1rem;
+}
+
+.cloud-list-grid {
+  grid-template-columns: repeat(auto-fit, minmax(240px, 1fr));
+}
+
 .phrase-head,
 .shared-head {
   display: grid;
@@ -605,6 +615,11 @@ h3 {
   flex-direction: column;
   align-items: flex-start;
   gap: 0.3rem;
+}
+
+.shared-row.active {
+  border-color: rgba(138, 214, 255, 0.8);
+  background: linear-gradient(145deg, rgba(32, 54, 77, 0.95), rgba(24, 42, 60, 0.88));
 }
 
 .rule-list,

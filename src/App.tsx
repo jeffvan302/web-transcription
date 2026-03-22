@@ -151,6 +151,7 @@ export default function App() {
   const [mediaProbeInFlight, setMediaProbeInFlight] = useState(false);
   const [mediaSubtitleStreams, setMediaSubtitleStreams] = useState<SubtitleStreamRecord[]>([]);
   const [selectedSubtitleStreamIndex, setSelectedSubtitleStreamIndex] = useState<string>("");
+  const [cloudListFilter, setCloudListFilter] = useState("");
   const [passwordForm, setPasswordForm] = useState({
     currentPassword: "",
     nextPassword: "",
@@ -203,6 +204,13 @@ export default function App() {
       return leftOwned - rightOwned;
     }
     return left.title.localeCompare(right.title);
+  });
+  const filteredCloudTitles = libraryTitles.filter((title) => {
+    const query = cloudListFilter.trim().toLowerCase();
+    if (!query) {
+      return true;
+    }
+    return [title.title, title.source, title.videoId].some((value) => value.toLowerCase().includes(query));
   });
 
   useEffect(() => {
@@ -804,6 +812,22 @@ export default function App() {
       selectedPhraseIds: nextTitle.phrases[0] ? [nextTitle.phrases[0].id] : [],
     }));
     postStatus("info", `${nextTitle.title} loaded.`);
+  }
+
+  async function focusSharedTitle(titleId: string) {
+    await commitText();
+    const nextTitle = appStateRef.current.titles.find((title) => title.id === titleId);
+    if (!nextTitle) {
+      return;
+    }
+
+    updateState((current) => ({
+      ...current,
+      currentView: "shared",
+      selectedTitleId: nextTitle.id,
+      selectedPhraseIds: nextTitle.phrases[0] ? [nextTitle.phrases[0].id] : [],
+    }));
+    postStatus("info", `${nextTitle.title} selected in the cloud list.`);
   }
 
   async function selectPhrase(phraseId: string, multi: boolean) {
@@ -2239,6 +2263,65 @@ export default function App() {
             </div>
           </section>
 
+          <section className="card form-card">
+            <div className="card-header">
+              <div>
+                <span className="eyebrow">Cloud List</span>
+                <h3>Titles on Cloud</h3>
+              </div>
+              <span className="pill">{filteredCloudTitles.length} title{filteredCloudTitles.length === 1 ? "" : "s"}</span>
+            </div>
+            <div className="cloud-list-toolbar">
+              <label className="field">
+                <span>Filter Cloud Titles</span>
+                <input
+                  value={cloudListFilter}
+                  onChange={(event) => setCloudListFilter(event.target.value)}
+                  placeholder="Search by title, source, or video ID"
+                />
+              </label>
+              <div className="helper-text">
+                {selectedTitle ? `Selected title: ${selectedTitle.title || selectedTitle.videoId}` : "Select a title to focus it in the cloud table."}
+              </div>
+            </div>
+            {filteredCloudTitles.length === 0 ? (
+              <p className="helper-text">No cloud titles match the current filter.</p>
+            ) : (
+              <div className="title-list cloud-list-grid">
+                {filteredCloudTitles.map((title) => {
+                  const checkoutOwner = title.checkedOutByUserId
+                    ? appState.users.find((user) => user.id === title.checkedOutByUserId)?.displayName ?? "Unknown user"
+                    : null;
+
+                  return (
+                    <button
+                      className={`title-card ${selectedTitle?.id === title.id ? "active" : ""} ${
+                        title.checkedOutByUserId && title.checkedOutByUserId !== currentUser.id ? "locked" : ""
+                      }`}
+                      key={title.id}
+                      onClick={() => void focusSharedTitle(title.id)}
+                      type="button"
+                    >
+                      <div className="title-card-top">
+                        <strong>{title.title || title.videoId}</strong>
+                        <span className={`pill ${title.checkedOutByUserId ? "accent" : ""}`}>{getTitleStateLabel(title)}</span>
+                      </div>
+                      <span>{title.source}</span>
+                      <div className="title-meta">
+                        <span>{title.videoId}</span>
+                        <span>{title.sizeLabel}</span>
+                      </div>
+                      <div className="title-meta">
+                        <span>Uploaded {formatTimestamp(title.uploadedAt)}</span>
+                        <span>{checkoutOwner ? `Checked out by ${checkoutOwner}` : "Available for checkout"}</span>
+                      </div>
+                    </button>
+                  );
+                })}
+              </div>
+            )}
+          </section>
+
           <div className="shared-table">
             <div className="shared-head">
               <span>Title / Video ID</span>
@@ -2248,7 +2331,7 @@ export default function App() {
               <span>Actions</span>
             </div>
             {libraryTitles.map((title) => (
-              <div className="shared-row" key={title.id}>
+              <div className={`shared-row ${selectedTitle?.id === title.id ? "active" : ""}`} key={title.id}>
                 <div>
                   <strong>{title.title || title.videoId}</strong>
                   <span>{title.source}</span>
