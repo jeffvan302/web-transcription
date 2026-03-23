@@ -7,6 +7,7 @@ import {
   createTitleRecord,
   failJob,
   getActiveCheckoutForUser,
+  getDraftForTitle,
   getJob,
   getTitleByVideoId,
   insertAuditRecord,
@@ -27,6 +28,7 @@ import {
   pickBestSubtitleSource,
 } from "./media.js";
 import { getObjectKey, getStorageService } from "./storage.js";
+import { persistTitleSentenceState } from "./title-state.js";
 import { parseSubtitleFile } from "./subtitles.js";
 import { transcribeAudio } from "./transcription.js";
 
@@ -81,7 +83,7 @@ async function finalizeImportedTitle(job, payload) {
   updateJobProgress(job.id, 90, "Persisting title");
   const { audioObjectKey, waveformObjectKey } = await persistArtifacts(titleId, audioPath, waveformPath);
 
-  createTitleRecord({
+  const createdTitle = createTitleRecord({
     id: titleId,
     videoId,
     workspaceId: payload.workspaceId || null,
@@ -100,6 +102,13 @@ async function finalizeImportedTitle(job, payload) {
     badge: payload.badge || null,
     audioObjectKey,
     waveformObjectKey,
+  });
+
+  await persistTitleSentenceState({
+    titleRow: createdTitle,
+    phrases,
+    savedSnapshot: phrases,
+    draftRow: autoCheckout ? getDraftForTitle(titleId) : null,
   });
 
   insertAuditRecord({

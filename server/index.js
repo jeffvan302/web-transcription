@@ -44,6 +44,7 @@ import { listSubtitleStreams } from "./media.js";
 import { startJobWorker } from "./jobs.js";
 import { getYouTubeMetadata } from "./media.js";
 import { getObjectKey, getStorageService } from "./storage.js";
+import { deleteTitleSentenceState, persistTitleSentenceState } from "./title-state.js";
 import { createCookieOptions, ensureDir, nowIso, parseJson, randomId } from "./helpers.js";
 
 const app = express();
@@ -652,229 +653,273 @@ app.post("/api/youtube/probe", requireUser, async (req, res, next) => {
   }
 });
 
-app.post("/api/titles/:titleId/checkout", requireUser, (req, res) => {
-  const titleRow = getTitleRow(req.params.titleId);
-  if (!titleRow) {
-    res.status(404).json({ error: "Title not found." });
-    return;
-  }
+app.post("/api/titles/:titleId/checkout", requireUser, async (req, res, next) => {
+  try {
+    const titleRow = getTitleRow(req.params.titleId);
+    if (!titleRow) {
+      res.status(404).json({ error: "Title not found." });
+      return;
+    }
 
-  if (titleRow.checked_out_by_user_id && titleRow.checked_out_by_user_id !== req.user.id) {
-    res.status(409).json({ error: "This title is already checked out by another user." });
-    return;
-  }
+    if (titleRow.checked_out_by_user_id && titleRow.checked_out_by_user_id !== req.user.id) {
+      res.status(409).json({ error: "This title is already checked out by another user." });
+      return;
+    }
 
-  const activeCheckout = getActiveCheckoutForUser(req.user.id);
-  if (activeCheckout && activeCheckout.id !== titleRow.id) {
-    res.status(409).json({ error: "A user may hold only one active checkout at a time." });
-    return;
-  }
+    const activeCheckout = getActiveCheckoutForUser(req.user.id);
+    if (activeCheckout && activeCheckout.id !== titleRow.id) {
+      res.status(409).json({ error: "A user may hold only one active checkout at a time." });
+      return;
+    }
 
-  if (!titleRow.checked_out_by_user_id) {
-    const phrases = parseJson(titleRow.phrases_json, []);
-    const savedSnapshot = parseJson(titleRow.saved_snapshot_json, []);
-    updateTitleRecord(titleRow.id, {
-      ...titleRow,
-      checked_out_by_user_id: req.user.id,
-      checked_out_at: nowIso(),
-    });
-    createOrReplaceDraft({
+    if (!titleRow.checked_out_by_user_id) {
+      const phrases = parseJson(titleRow.phrases_json, []);
+      const savedSnapshot = parseJson(titleRow.saved_snapshot_json, []);
+      const checkedOutAt = nowIso();
+      const updatedTitle = updateTitleRecord(titleRow.id, {
+        ...titleRow,
+        checked_out_by_user_id: req.user.id,
+        checked_out_at: checkedOutAt,
+      });
+      const draftRow = createOrReplaceDraft({
+        titleId: titleRow.id,
+        userId: req.user.id,
+        phrases,
+        savedSnapshot,
+        version: 1,
+        isDirty: false,
+        status: "active",
+        lastAutosaveAt: null,
+        lastSaveAt: checkedOutAt,
+        lastSyncAt: null,
+      });
+      await persistTitleSentenceState({
+        titleRow: updatedTitle,
+        phrases,
+        savedSnapshot,
+        draftRow,
+      });
+      createCheckoutRecord(titleRow.id, req.user.id, false);
+
+      insertAuditRecord({
+        eventType: "checkout",
+        titleId: titleRow.id,
+        titleName: titleRow.title,
+        actorUserId: req.user.id,
+        actorDisplayName: req.user.displayName,
+        details: "Checked out title and resumed the latest server-side draft.",
+      });
+    }
+
+    sendAppState(res, req.user.id);
+  } catch (error) {
+    next(error);
+  }
+});
+
+app.post("/api/titles/:titleId/save", requireUser, async (req, res, next) => {
+  try {
+    const titleRow = getTitleRow(req.params.titleId);
+    if (!titleRow) {
+      res.status(404).json({ error: "Title not found." });
+      return;
+    }
+
+    const kind = String(req.body?.kind || "manual");
+    const title = req.body?.title || null;
+    if (titleRow.checked_out_by_user_id !== req.user.id) {
+      res.status(409).json({ error: "Only the checkout owner can save this title." });
+      return;
+    }
+
+    const timestamp = nowIso();
+    const draft = getDraftForTitle(titleRow.id);
+    const phrases = Array.isArray(title?.phrases) ? title.phrases : parseJson(draft?.phrases_json || titleRow.phrases_json, []);
+    const savedSnapshot = Array.isArray(title?.savedSnapshot)
+      ? title.savedSnapshot
+      : parseJson(draft?.saved_snapshot_json || titleRow.saved_snapshot_json, []);
+
+    const nextDraft = createOrReplaceDraft({
       titleId: titleRow.id,
       userId: req.user.id,
       phrases,
       savedSnapshot,
-      version: 1,
+      version: (draft?.version || 0) + 1,
       isDirty: false,
-      status: "active",
-      lastAutosaveAt: null,
-      lastSaveAt: nowIso(),
-      lastSyncAt: null,
+      status: kind === "checkin" ? "finalized" : "active",
+      lastAutosaveAt: kind === "autosave" ? timestamp : draft?.last_autosave_at || null,
+      lastSaveAt: kind === "manual" || kind === "checkin" ? timestamp : draft?.last_save_at || null,
+      lastSyncAt: kind === "sync" ? timestamp : draft?.last_sync_at || null,
     });
-    createCheckoutRecord(titleRow.id, req.user.id, false);
 
-    insertAuditRecord({
-      eventType: "checkout",
-      titleId: titleRow.id,
-      titleName: titleRow.title,
-      actorUserId: req.user.id,
-      actorDisplayName: req.user.displayName,
-      details: "Checked out title and resumed the latest server-side draft.",
-    });
-  }
+    const basePatch = {
+      ...titleRow,
+      title: title?.title || titleRow.title,
+      source: title?.source || titleRow.source,
+      language: title?.language || titleRow.language,
+      duration: Number(title?.duration || titleRow.duration || 0),
+      phrase_count: phrases.length,
+      badge: badgeForPhrases(phrases, titleRow.badge),
+    };
 
-  sendAppState(res, req.user.id);
-});
-
-app.post("/api/titles/:titleId/save", requireUser, (req, res) => {
-  const titleRow = getTitleRow(req.params.titleId);
-  if (!titleRow) {
-    res.status(404).json({ error: "Title not found." });
-    return;
-  }
-
-  const kind = String(req.body?.kind || "manual");
-  const title = req.body?.title || null;
-  if (titleRow.checked_out_by_user_id !== req.user.id) {
-    res.status(409).json({ error: "Only the checkout owner can save this title." });
-    return;
-  }
-
-  const timestamp = nowIso();
-  const draft = getDraftForTitle(titleRow.id);
-  const phrases = Array.isArray(title?.phrases) ? title.phrases : parseJson(draft?.phrases_json || titleRow.phrases_json, []);
-  const savedSnapshot = Array.isArray(title?.savedSnapshot)
-    ? title.savedSnapshot
-    : parseJson(draft?.saved_snapshot_json || titleRow.saved_snapshot_json, []);
-
-  createOrReplaceDraft({
-    titleId: titleRow.id,
-    userId: req.user.id,
-    phrases,
-    savedSnapshot,
-    version: (draft?.version || 0) + 1,
-    isDirty: false,
-    status: kind === "checkin" ? "finalized" : "active",
-    lastAutosaveAt: kind === "autosave" ? timestamp : draft?.last_autosave_at || null,
-    lastSaveAt: kind === "manual" || kind === "checkin" ? timestamp : draft?.last_save_at || null,
-    lastSyncAt: kind === "sync" ? timestamp : draft?.last_sync_at || null,
-  });
-
-  const basePatch = {
-    ...titleRow,
-    title: title?.title || titleRow.title,
-    source: title?.source || titleRow.source,
-    language: title?.language || titleRow.language,
-    duration: Number(title?.duration || titleRow.duration || 0),
-    phrase_count: phrases.length,
-    badge: badgeForPhrases(phrases, titleRow.badge),
-  };
-
-  if (kind === "checkin") {
-    updateTitleRecord(titleRow.id, {
-      ...basePatch,
-      phrases_json: JSON.stringify(phrases),
-      saved_snapshot_json: JSON.stringify(savedSnapshot),
-      checked_out_by_user_id: null,
-      checked_out_at: null,
-    });
-    closeCheckoutRecords(titleRow.id);
-    insertAuditRecord({
-      eventType: "checkin",
-      titleId: titleRow.id,
-      titleName: title?.title || titleRow.title,
-      actorUserId: req.user.id,
-      actorDisplayName: req.user.displayName,
-      details: "Checked in the latest finalized working draft.",
-    });
-  } else {
-    updateTitleRecord(titleRow.id, basePatch);
-    if (kind === "sync") {
+    let updatedTitle = null;
+    if (kind === "checkin") {
+      updatedTitle = updateTitleRecord(titleRow.id, {
+        ...basePatch,
+        phrases_json: JSON.stringify(phrases),
+        saved_snapshot_json: JSON.stringify(savedSnapshot),
+        checked_out_by_user_id: null,
+        checked_out_at: null,
+      });
+      closeCheckoutRecords(titleRow.id);
       insertAuditRecord({
-        eventType: "sync",
+        eventType: "checkin",
         titleId: titleRow.id,
         titleName: title?.title || titleRow.title,
         actorUserId: req.user.id,
         actorDisplayName: req.user.displayName,
-        details: "Synced working-draft changes while keeping the checkout.",
+        details: "Checked in the latest finalized working draft.",
       });
+    } else {
+      updatedTitle = updateTitleRecord(titleRow.id, basePatch);
+      if (kind === "sync") {
+        insertAuditRecord({
+          eventType: "sync",
+          titleId: titleRow.id,
+          titleName: title?.title || titleRow.title,
+          actorUserId: req.user.id,
+          actorDisplayName: req.user.displayName,
+          details: "Synced working-draft changes while keeping the checkout.",
+        });
+      }
     }
-  }
 
-  sendAppState(res, req.user.id);
+    await persistTitleSentenceState({
+      titleRow: updatedTitle,
+      phrases,
+      savedSnapshot,
+      draftRow: nextDraft,
+    });
+
+    sendAppState(res, req.user.id);
+  } catch (error) {
+    next(error);
+  }
 });
 
-app.post("/api/titles/:titleId/force-checkin", requireAdmin, (req, res) => {
-  const titleRow = getTitleRow(req.params.titleId);
-  if (!titleRow) {
-    res.status(404).json({ error: "Title not found." });
-    return;
-  }
+app.post("/api/titles/:titleId/force-checkin", requireAdmin, async (req, res, next) => {
+  try {
+    const titleRow = getTitleRow(req.params.titleId);
+    if (!titleRow) {
+      res.status(404).json({ error: "Title not found." });
+      return;
+    }
 
-  const draft = getDraftForTitle(titleRow.id);
-  const phrases = draft ? parseJson(draft.phrases_json, []) : parseJson(titleRow.phrases_json, []);
-  updateTitleRecord(titleRow.id, {
-    ...titleRow,
-    phrases_json: JSON.stringify(phrases),
-    saved_snapshot_json: JSON.stringify(phrases),
-    checked_out_by_user_id: null,
-    checked_out_at: null,
-    phrase_count: phrases.length,
-    badge: badgeForPhrases(phrases, titleRow.badge),
-  });
-  if (draft) {
-    createOrReplaceDraft({
-      titleId: titleRow.id,
-      userId: draft.user_id,
+    const draft = getDraftForTitle(titleRow.id);
+    const phrases = draft ? parseJson(draft.phrases_json, []) : parseJson(titleRow.phrases_json, []);
+    const updatedTitle = updateTitleRecord(titleRow.id, {
+      ...titleRow,
+      phrases_json: JSON.stringify(phrases),
+      saved_snapshot_json: JSON.stringify(phrases),
+      checked_out_by_user_id: null,
+      checked_out_at: null,
+      phrase_count: phrases.length,
+      badge: badgeForPhrases(phrases, titleRow.badge),
+    });
+    const archivedDraft = draft
+      ? createOrReplaceDraft({
+          titleId: titleRow.id,
+          userId: draft.user_id,
+          phrases,
+          savedSnapshot: phrases,
+          version: draft.version,
+          isDirty: false,
+          status: "archived",
+          lastAutosaveAt: draft.last_autosave_at,
+          lastSaveAt: draft.last_save_at,
+          lastSyncAt: draft.last_sync_at,
+        })
+      : null;
+    await persistTitleSentenceState({
+      titleRow: updatedTitle,
       phrases,
       savedSnapshot: phrases,
-      version: draft.version,
-      isDirty: false,
-      status: "archived",
-      lastAutosaveAt: draft.last_autosave_at,
-      lastSaveAt: draft.last_save_at,
-      lastSyncAt: draft.last_sync_at,
+      draftRow: archivedDraft,
     });
-  }
-  closeCheckoutRecords(titleRow.id);
-  insertAuditRecord({
-    eventType: "force_checkin",
-    titleId: titleRow.id,
-    titleName: titleRow.title,
-    actorUserId: req.user.id,
-    actorDisplayName: req.user.displayName,
-    details: "Admin forced a check-in using the latest server-persisted copy.",
-  });
+    closeCheckoutRecords(titleRow.id);
+    insertAuditRecord({
+      eventType: "force_checkin",
+      titleId: titleRow.id,
+      titleName: titleRow.title,
+      actorUserId: req.user.id,
+      actorDisplayName: req.user.displayName,
+      details: "Admin forced a check-in using the latest server-persisted copy.",
+    });
 
-  sendAppState(res, req.user.id);
+    sendAppState(res, req.user.id);
+  } catch (error) {
+    next(error);
+  }
 });
 
-app.post("/api/titles/:titleId/takeover", requireAdmin, (req, res) => {
-  const titleRow = getTitleRow(req.params.titleId);
-  if (!titleRow) {
-    res.status(404).json({ error: "Title not found." });
-    return;
+app.post("/api/titles/:titleId/takeover", requireAdmin, async (req, res, next) => {
+  try {
+    const titleRow = getTitleRow(req.params.titleId);
+    if (!titleRow) {
+      res.status(404).json({ error: "Title not found." });
+      return;
+    }
+
+    const activeCheckout = getActiveCheckoutForUser(req.user.id);
+    if (activeCheckout && activeCheckout.id !== titleRow.id) {
+      res.status(409).json({ error: "You already hold another checked-out title." });
+      return;
+    }
+
+    const previousOwnerId = titleRow.checked_out_by_user_id;
+    const draft = getDraftForTitle(titleRow.id);
+    const phrases = draft ? parseJson(draft.phrases_json, []) : parseJson(titleRow.phrases_json, []);
+    const savedSnapshot = draft ? parseJson(draft.saved_snapshot_json, []) : parseJson(titleRow.saved_snapshot_json, []);
+    const checkedOutAt = nowIso();
+
+    const updatedTitle = updateTitleRecord(titleRow.id, {
+      ...titleRow,
+      checked_out_by_user_id: req.user.id,
+      checked_out_at: checkedOutAt,
+    });
+    const nextDraft = createOrReplaceDraft({
+      titleId: titleRow.id,
+      userId: req.user.id,
+      phrases,
+      savedSnapshot,
+      version: (draft?.version || 0) + 1,
+      isDirty: false,
+      status: "active",
+      lastAutosaveAt: draft?.last_autosave_at || null,
+      lastSaveAt: draft?.last_save_at || checkedOutAt,
+      lastSyncAt: draft?.last_sync_at || null,
+    });
+    await persistTitleSentenceState({
+      titleRow: updatedTitle,
+      phrases,
+      savedSnapshot,
+      draftRow: nextDraft,
+    });
+    closeCheckoutRecords(titleRow.id);
+    createCheckoutRecord(titleRow.id, req.user.id, true);
+    insertAuditRecord({
+      eventType: "takeover",
+      titleId: titleRow.id,
+      titleName: titleRow.title,
+      actorUserId: req.user.id,
+      actorDisplayName: req.user.displayName,
+      details: `Admin took over the checkout${previousOwnerId ? ` from ${previousOwnerId}` : ""} and preserved the stored draft.`,
+    });
+
+    sendAppState(res, req.user.id);
+  } catch (error) {
+    next(error);
   }
-
-  const activeCheckout = getActiveCheckoutForUser(req.user.id);
-  if (activeCheckout && activeCheckout.id !== titleRow.id) {
-    res.status(409).json({ error: "You already hold another checked-out title." });
-    return;
-  }
-
-  const previousOwnerId = titleRow.checked_out_by_user_id;
-  const draft = getDraftForTitle(titleRow.id);
-  const phrases = draft ? parseJson(draft.phrases_json, []) : parseJson(titleRow.phrases_json, []);
-  const savedSnapshot = draft ? parseJson(draft.saved_snapshot_json, []) : parseJson(titleRow.saved_snapshot_json, []);
-
-  updateTitleRecord(titleRow.id, {
-    ...titleRow,
-    checked_out_by_user_id: req.user.id,
-    checked_out_at: nowIso(),
-  });
-  createOrReplaceDraft({
-    titleId: titleRow.id,
-    userId: req.user.id,
-    phrases,
-    savedSnapshot,
-    version: (draft?.version || 0) + 1,
-    isDirty: false,
-    status: "active",
-    lastAutosaveAt: draft?.last_autosave_at || null,
-    lastSaveAt: draft?.last_save_at || null,
-    lastSyncAt: draft?.last_sync_at || null,
-  });
-  closeCheckoutRecords(titleRow.id);
-  createCheckoutRecord(titleRow.id, req.user.id, true);
-  insertAuditRecord({
-    eventType: "takeover",
-    titleId: titleRow.id,
-    titleName: titleRow.title,
-    actorUserId: req.user.id,
-    actorDisplayName: req.user.displayName,
-    details: `Admin took over the checkout${previousOwnerId ? ` from ${previousOwnerId}` : ""} and preserved the stored draft.`,
-  });
-
-  sendAppState(res, req.user.id);
 });
 
 app.delete("/api/titles/:titleId", requireAdmin, async (req, res, next) => {
@@ -889,6 +934,7 @@ app.delete("/api/titles/:titleId", requireAdmin, async (req, res, next) => {
     for (const key of [titleRow.audio_object_key, titleRow.waveform_object_key, titleRow.latest_asr_object_key].filter(Boolean)) {
       await storage.deleteObject(key);
     }
+    await deleteTitleSentenceState(titleRow.id);
 
     deleteTitleRecord(titleRow.id);
     insertAuditRecord({
