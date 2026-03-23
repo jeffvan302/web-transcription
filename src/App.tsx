@@ -2110,7 +2110,7 @@ export default function App() {
 
     if (kind === "all") {
       window.location.href = "/api/export/all";
-      postStatus("success", "Preparing export bundle from the server.");
+      postStatus("success", "Preparing the reviewed-clip dataset export from the server.");
       return;
     }
 
@@ -2119,11 +2119,11 @@ export default function App() {
       return;
     }
 
-    window.location.href = `/api/titles/${selectedTitle.id}/export.asr`;
+    window.location.href = kind === "pack" ? `/api/titles/${selectedTitle.id}/export.asr` : `/api/titles/${selectedTitle.id}/export`;
     postStatus(
       "success",
       kind === "current"
-        ? "Preparing the current title export on the server."
+        ? "Preparing the current title reviewed-clip dataset export on the server."
         : "Packing the current title into a compatible .asr archive.",
     );
   }

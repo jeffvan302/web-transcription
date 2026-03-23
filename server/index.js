@@ -1,6 +1,5 @@
 import fs from "node:fs";
 import path from "node:path";
-import archiver from "archiver";
 import bcrypt from "bcryptjs";
 import cookieParser from "cookie-parser";
 import express from "express";
@@ -42,13 +41,14 @@ import {
 } from "./database.js";
 import { appConfig, paths } from "./config.js";
 import { createAsrArchive } from "./asr.js";
+import { createDatasetArchive } from "./dataset-export.js";
 import { listSubtitleStreams } from "./media.js";
 import { startJobWorker } from "./jobs.js";
 import { getYouTubeMetadata } from "./media.js";
 import { getObjectKey, getStorageService } from "./storage.js";
 import { getKeepAwakeStatus, noteKeepAwakeActivity, startKeepAwakeManager, triggerKeepAwakeCheck } from "./keep-awake.js";
 import { deleteTitleSentenceState, persistTitleSentenceState } from "./title-state.js";
-import { createCookieOptions, ensureDir, nowIso, parseJson, randomId } from "./helpers.js";
+import { createCookieOptions, ensureDir, nowIso, parseJson, randomId, sanitizeFileSegment } from "./helpers.js";
 
 const app = express();
 
@@ -283,6 +283,19 @@ async function materializeObject(key, fileName) {
   const buffer = await storage.getBuffer(key);
   await fs.promises.writeFile(outputPath, buffer);
   return outputPath;
+}
+
+function serializeTitleForExport(titleRow) {
+  return {
+    id: titleRow.id,
+    videoId: titleRow.video_id,
+    title: titleRow.title,
+    source: titleRow.source,
+    language: titleRow.language,
+    duration: titleRow.duration,
+    sourceType: titleRow.source_type,
+    uploadedAt: titleRow.uploaded_at,
+  };
 }
 
 function badgeForPhrases(phrases, fallback = null) {
@@ -1152,16 +1165,7 @@ app.get("/api/titles/:titleId/export.asr", requireUser, async (req, res, next) =
 
     await createAsrArchive(
       {
-        title: {
-          id: titleRow.id,
-          videoId: titleRow.video_id,
-          title: titleRow.title,
-          source: titleRow.source,
-          language: titleRow.language,
-          duration: titleRow.duration,
-          sourceType: titleRow.source_type,
-          uploadedAt: titleRow.uploaded_at,
-        },
+        title: serializeTitleForExport(titleRow),
         phrases,
         audioFilePath: audioPath,
         outputPath: archivePath,
@@ -1182,6 +1186,45 @@ app.get("/api/titles/:titleId/export.asr", requireUser, async (req, res, next) =
   }
 });
 
+app.get("/api/titles/:titleId/export", requireUser, async (req, res, next) => {
+  try {
+    const titleRow = getTitleRow(req.params.titleId);
+    if (!titleRow) {
+      res.status(404).json({ error: "Title not found." });
+      return;
+    }
+
+    const { phrases } = getTitlePhrasesForUser(titleRow, req.user.id);
+    const audioPath = await materializeObject(titleRow.audio_object_key, "working_audio.wav");
+    const datasetPath = path.join(paths.tempDir, `${randomId("dataset")}.zip`);
+    const datasetWorkDir = path.join(paths.tempDir, randomId("dataset-work"));
+    const result = await createDatasetArchive({
+      items: [
+        {
+          title: serializeTitleForExport(titleRow),
+          phrases,
+          audioFilePath: audioPath,
+        },
+      ],
+      outputPath: datasetPath,
+      workDir: datasetWorkDir,
+    });
+
+    insertAuditRecord({
+      eventType: "export",
+      titleId: titleRow.id,
+      titleName: titleRow.title,
+      actorUserId: req.user.id,
+      actorDisplayName: req.user.displayName,
+      details: `Exported ${result.clipCount} reviewed clip${result.clipCount === 1 ? "" : "s"} as a TSV dataset package.`,
+    });
+
+    res.download(datasetPath, `${sanitizeFileSegment(titleRow.video_id || titleRow.title || titleRow.id)}-dataset.zip`);
+  } catch (error) {
+    next(error);
+  }
+});
+
 app.get("/api/export/all", requireUser, async (req, res, next) => {
   try {
     const state = buildAppState(req.user.id);
@@ -1190,45 +1233,35 @@ app.get("/api/export/all", requireUser, async (req, res, next) => {
       .map((value) => value.trim())
       .filter(Boolean);
     const titles = state.titles.filter((title) => selectedIds.length === 0 || selectedIds.includes(title.id));
-    const bundlePath = path.join(paths.tempDir, `${randomId("bundle")}.zip`);
-
-    await new Promise((resolve, reject) => {
-      const output = fs.createWriteStream(bundlePath);
-      const archive = archiver("zip", { zlib: { level: 9 } });
-      output.on("close", resolve);
-      output.on("error", reject);
-      archive.on("error", reject);
-      archive.pipe(output);
-
-      const tasks = titles.map(async (title) => {
+    const datasetItems = await Promise.all(
+      titles.map(async (title) => {
         const titleRow = getTitleRow(title.id);
         const { phrases } = getTitlePhrasesForUser(titleRow, req.user.id);
         const audioPath = await materializeObject(titleRow.audio_object_key, "working_audio.wav");
-        const tempAsrPath = path.join(paths.tempDir, `${title.id}.asr`);
-        await createAsrArchive({
-          title: {
-            id: titleRow.id,
-            videoId: titleRow.video_id,
-            title: titleRow.title,
-            source: titleRow.source,
-            language: titleRow.language,
-            duration: titleRow.duration,
-            sourceType: titleRow.source_type,
-            uploadedAt: titleRow.uploaded_at,
-          },
+        return {
+          title: serializeTitleForExport(titleRow),
           phrases,
           audioFilePath: audioPath,
-          outputPath: tempAsrPath,
-        });
-        archive.file(tempAsrPath, { name: `${title.videoId}.asr` });
-      });
-
-      Promise.all(tasks)
-        .then(() => archive.finalize())
-        .catch(reject);
+        };
+      }),
+    );
+    const bundlePath = path.join(paths.tempDir, `${randomId("dataset-bundle")}.zip`);
+    const bundleWorkDir = path.join(paths.tempDir, randomId("dataset-work"));
+    const result = await createDatasetArchive({
+      items: datasetItems,
+      outputPath: bundlePath,
+      workDir: bundleWorkDir,
     });
 
-    res.download(bundlePath, "yt-asr-export-bundle.zip");
+    insertAuditRecord({
+      eventType: "export",
+      titleName: state.workspaceName || "Workspace",
+      actorUserId: req.user.id,
+      actorDisplayName: req.user.displayName,
+      details: `Exported ${result.clipCount} reviewed clip${result.clipCount === 1 ? "" : "s"} from ${titles.length} title${titles.length === 1 ? "" : "s"} as a TSV dataset package.`,
+    });
+
+    res.download(bundlePath, "yt-asr-dataset-export.zip");
   } catch (error) {
     next(error);
   }
