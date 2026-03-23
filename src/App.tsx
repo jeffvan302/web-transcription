@@ -1645,6 +1645,40 @@ export default function App() {
     }
   }
 
+  async function deleteManagedUser(userId: string) {
+    if (!currentUser || currentUser.role !== "admin") {
+      return;
+    }
+
+    const targetUser = appState.users.find((user) => user.id === userId);
+    if (!targetUser) {
+      postStatus("warning", "That user no longer exists in the current server state.");
+      return;
+    }
+    if (targetUser.id === currentUser.id) {
+      postStatus("warning", "Sign in as a different admin if you need to remove this account.");
+      return;
+    }
+
+    const confirmed = window.confirm(
+      `Delete ${targetUser.displayName}? This removes the account, signs the user out, and releases any checked-out title.`,
+    );
+    if (!confirmed) {
+      return;
+    }
+
+    try {
+      const response = await api.deleteUser(userId);
+      applyServerResponse(response, { preserveView: true });
+      if (generatedRecovery?.userId === userId) {
+        setGeneratedRecovery(null);
+      }
+      postStatus("success", `${targetUser.displayName} removed from the workspace.`);
+    } catch (error) {
+      postStatus("error", error instanceof Error ? error.message : "Could not delete the user.");
+    }
+  }
+
   async function selectWorkspace(workspaceId: string) {
     if (!currentUser || workspaceId === appState.selectedWorkspaceId) {
       return;
@@ -3590,7 +3624,20 @@ export default function App() {
                         <button className="toolbar-button" onClick={() => void issueManagedUserRecovery(selectedManagedUser.id)} type="button">
                           Issue Recovery Token
                         </button>
+                        <button
+                          className="toolbar-button danger"
+                          disabled={selectedManagedUser.id === currentUser.id}
+                          onClick={() => void deleteManagedUser(selectedManagedUser.id)}
+                          type="button"
+                        >
+                          Delete User
+                        </button>
                       </div>
+                      {selectedManagedUser.id === currentUser.id ? (
+                        <div className="settings-note warning-note">
+                          Sign in as a different admin if you need to remove this account.
+                        </div>
+                      ) : null}
                       {generatedRecovery?.userId === selectedManagedUser.id ? (
                         <div className="settings-note">
                           Recovery token expires {formatTimestamp(generatedRecovery.expiresAt)}.

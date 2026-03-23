@@ -124,6 +124,11 @@ export const api = {
       body: JSON.stringify(input),
     });
   },
+  deleteUser(userId: string) {
+    return requestJson<AppStateResponse>(`/api/admin/users/${userId}`, {
+      method: "DELETE",
+    });
+  },
   resetUserPassword(userId: string, nextPassword: string, mustChangePassword = true) {
     return requestJson<AppStateResponse>(`/api/admin/users/${userId}/reset-password`, {
       method: "POST",

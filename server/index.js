@@ -16,6 +16,7 @@ import {
   createSession,
   createUserAccount,
   createWorkspace,
+  deleteUserAccount,
   deleteSession,
   deleteTitleRecord,
   findUserByIdentifier,
@@ -597,6 +598,69 @@ app.patch("/api/admin/users/:userId", requireAdmin, (req, res) => {
     sendAppState(res, req.user.id);
   } catch (error) {
     res.status(400).json({ error: error instanceof Error ? error.message : "Could not update user." });
+  }
+});
+
+app.delete("/api/admin/users/:userId", requireAdmin, async (req, res, next) => {
+  try {
+    const deleted = deleteUserAccount(req.params.userId, req.user.id);
+
+    reqUserDisplayNameCache.delete(deleted.user.id);
+
+    const cloudSyncResults = await Promise.allSettled(
+      deleted.releasedTitleIds.map(async (titleId) => {
+        const titleRow = getTitleRow(titleId);
+        if (!titleRow) {
+          return;
+        }
+
+        await persistTitleSentenceState({
+          titleRow,
+          phrases: parseJson(titleRow.phrases_json, []),
+          savedSnapshot: parseJson(titleRow.saved_snapshot_json, []),
+          draftRow: null,
+        });
+      }),
+    );
+
+    cloudSyncResults.forEach((result, index) => {
+      if (result.status === "rejected") {
+        console.warn(`Could not refresh sentence state for released title ${deleted.releasedTitleIds[index]}.`, result.reason);
+      }
+    });
+
+    const detailsParts = [`Deleted user ${deleted.user.displayName} (${deleted.user.loginIdentity}).`];
+    if (deleted.reassignedTitleCount > 0) {
+      detailsParts.push(`Reassigned ${deleted.reassignedTitleCount} title${deleted.reassignedTitleCount === 1 ? "" : "s"} to the current admin.`);
+    }
+    if (deleted.releasedTitleCount > 0) {
+      detailsParts.push(`Released ${deleted.releasedTitleCount} checked-out title${deleted.releasedTitleCount === 1 ? "" : "s"}.`);
+    }
+
+    insertAuditRecord({
+      eventType: "user_delete",
+      titleName: "Workspace",
+      actorUserId: req.user.id,
+      actorDisplayName: req.user.displayName,
+      details: detailsParts.join(" "),
+    });
+
+    sendAppState(res, req.user.id);
+  } catch (error) {
+    if (error instanceof Error && (error.message === "User not found." || error.message === "Admin user not found.")) {
+      res.status(404).json({ error: error.message });
+      return;
+    }
+    if (
+      error instanceof Error &&
+      (error.message === "You cannot delete your own account." ||
+        error.message === "This user still has active imports or background jobs. Wait for them to finish before deleting the account." ||
+        error.message === "At least one active admin account must remain available.")
+    ) {
+      res.status(400).json({ error: error.message });
+      return;
+    }
+    next(error);
   }
 });
 

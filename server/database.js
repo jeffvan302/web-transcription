@@ -753,6 +753,68 @@ export function updateUserAccount(userId, patch) {
   return sanitizeUser(getUserById(userId));
 }
 
+const deleteUserAccountTransaction = db.transaction((targetUserId, actingAdminUserId) => {
+  const current = getUserById(targetUserId);
+  if (!current) {
+    throw new Error("User not found.");
+  }
+  if (!actingAdminUserId || !getUserById(actingAdminUserId)) {
+    throw new Error("Admin user not found.");
+  }
+  if (targetUserId === actingAdminUserId) {
+    throw new Error("You cannot delete your own account.");
+  }
+
+  assertAdminRetention(targetUserId, "user", "disabled");
+
+  const activeJobCount = Number(
+    db
+      .prepare("SELECT COUNT(*) AS count FROM jobs WHERE created_by_user_id = ? AND status IN ('queued', 'running')")
+      .get(targetUserId)?.count || 0,
+  );
+  if (activeJobCount > 0) {
+    throw new Error("This user still has active imports or background jobs. Wait for them to finish before deleting the account.");
+  }
+
+  const timestamp = nowIso();
+  const releasedTitleIds = db
+    .prepare("SELECT id FROM titles WHERE checked_out_by_user_id = ? ORDER BY title COLLATE NOCASE ASC")
+    .all(targetUserId)
+    .map((row) => row.id);
+
+  if (releasedTitleIds.length > 0) {
+    db.prepare(`
+      UPDATE titles
+      SET checked_out_by_user_id = NULL, checked_out_at = NULL, updated_at = ?
+      WHERE checked_out_by_user_id = ?
+    `).run(timestamp, targetUserId);
+  }
+
+  db.prepare("DELETE FROM drafts WHERE user_id = ?").run(targetUserId);
+
+  const reassignedTitleCount = db.prepare(`
+    UPDATE titles
+    SET created_by_user_id = ?, updated_at = ?
+    WHERE created_by_user_id = ?
+  `).run(actingAdminUserId, timestamp, targetUserId).changes;
+
+  const deleted = db.prepare("DELETE FROM users WHERE id = ?").run(targetUserId);
+  if (deleted.changes === 0) {
+    throw new Error("User not found.");
+  }
+
+  return {
+    user: sanitizeUser(current),
+    reassignedTitleCount,
+    releasedTitleIds,
+    releasedTitleCount: releasedTitleIds.length,
+  };
+});
+
+export function deleteUserAccount(targetUserId, actingAdminUserId) {
+  return deleteUserAccountTransaction(targetUserId, actingAdminUserId);
+}
+
 export function resetUserPassword(userId, nextPassword, mustChangePassword = true) {
   const current = getUserById(userId);
   if (!current) {
