@@ -369,6 +369,9 @@ export default function App() {
     return [title.title, title.source, title.videoId].some((value) => value.toLowerCase().includes(query));
   });
   const languageSuggestions = buildLanguageSuggestions(LANGUAGES, probedImportLanguages, [appState.importLanguage], [mediaLanguage]);
+  const selectedLibraryCheckoutOwner = selectedTitle?.checkedOutByUserId
+    ? appState.users.find((user) => user.id === selectedTitle.checkedOutByUserId)?.displayName ?? "Unknown user"
+    : null;
 
   useEffect(() => {
     void hydrateSession();
@@ -1130,7 +1133,7 @@ export default function App() {
       selectedTitleId: nextTitle.id,
       selectedPhraseIds: nextTitle.phrases[0] ? [nextTitle.phrases[0].id] : [],
     }));
-    postStatus("info", `${nextTitle.title} selected in the cloud list.`);
+    postStatus("info", `${nextTitle.title} selected in the library.`);
   }
 
   async function selectPhrase(phraseId: string, multi: boolean) {
@@ -1218,7 +1221,7 @@ export default function App() {
     setTopMenuOpen(false);
     updateState((current) => ({ ...current, currentView: view }));
     if (view === "shared") {
-      postStatus("info", "Shared library refreshed and ready for collaborative actions.");
+      postStatus("info", "Library ready for browse, checkout, and review actions.");
     }
     if (view === "editor") {
       postStatus("info", "Editor ready.");
@@ -1758,11 +1761,10 @@ export default function App() {
         ...response,
         state: {
           ...response.state,
-          currentView: "editor",
           selectedTitleId: titleId,
           selectedPhraseIds: title?.phrases[0] ? [title.phrases[0].id] : [],
         },
-      });
+      }, { preserveView: true });
       postStatus("success", `${title?.title ?? "Title"} is now checked out to you.`);
     } catch (error) {
       postStatus("error", error instanceof Error ? error.message : "Checkout failed.");
@@ -1831,11 +1833,10 @@ export default function App() {
         ...response,
         state: {
           ...response.state,
-          currentView: "editor",
           selectedTitleId: titleId,
           selectedPhraseIds: nextTitle?.phrases[0] ? [nextTitle.phrases[0].id] : [],
         },
-      });
+      }, { preserveView: true });
       postStatus("warning", `${target.title} is now checked out to ${currentUser.displayName}.`);
     } catch (error) {
       postStatus("error", error instanceof Error ? error.message : "Take over failed.");
@@ -2168,7 +2169,7 @@ export default function App() {
             <h2>Desktop workflow, translated to the browser.</h2>
             <ul>
               <li>Responsive left-center-right editor with waveform, phrase list, and persistent status feedback.</li>
-              <li>Shared library actions for check out, sync, check in, force check in, and admin take over.</li>
+              <li>Library actions for check out, sync, check in, force check in, and admin take over.</li>
               <li>Admin-only storage settings aligned to server-managed S3-compatible providers.</li>
             </ul>
           </div>
@@ -2212,7 +2213,7 @@ export default function App() {
               type="button"
               disabled={passwordChangeRequired}
             >
-              Cloud / Library
+              Library
             </button>
           </div>
           <button className="toolbar-button" onClick={reloadLibrary} type="button">
@@ -2281,7 +2282,7 @@ export default function App() {
               </label>
               <div className="topbar-menu-group">
                 <button className="toolbar-button primary" onClick={() => switchView("shared")} type="button" disabled={passwordChangeRequired}>
-                  Imports
+                  Library
                 </button>
                 <button
                   className="toolbar-button"
@@ -2758,8 +2759,8 @@ export default function App() {
         <section className="view-panel">
           <div className="panel-header">
             <div>
-              <span className="eyebrow">Shared Library</span>
-              <h2>Cloud Collaboration</h2>
+              <span className="eyebrow">Library</span>
+              <h2>Library</h2>
             </div>
             <div className="button-row">
               <button className="toolbar-button" onClick={reloadLibrary} type="button">
@@ -2894,14 +2895,14 @@ export default function App() {
           <section className="card form-card">
             <div className="card-header">
               <div>
-                <span className="eyebrow">Cloud List</span>
-                <h3>Titles on Cloud</h3>
+                <span className="eyebrow">Library</span>
+                <h3>Titles</h3>
               </div>
               <span className="pill">{filteredCloudTitles.length} title{filteredCloudTitles.length === 1 ? "" : "s"}</span>
             </div>
             <div className="cloud-list-toolbar">
               <label className="field">
-                <span>Filter Cloud Titles</span>
+                <span>Filter Titles</span>
                 <input
                   value={cloudListFilter}
                   onChange={(event) => setCloudListFilter(event.target.value)}
@@ -2909,107 +2910,147 @@ export default function App() {
                 />
               </label>
               <div className="helper-text">
-                {selectedTitle ? `Selected title: ${selectedTitle.title || selectedTitle.videoId}` : "Select a title to focus it in the cloud table."}
+                {selectedTitle ? `Selected title: ${selectedTitle.title || selectedTitle.videoId}` : "Select a title to review its details."}
               </div>
             </div>
             {filteredCloudTitles.length === 0 ? (
-              <p className="helper-text">No cloud titles match the current filter.</p>
+              <p className="helper-text">No library titles match the current filter.</p>
             ) : (
-              <div className="title-list cloud-list-grid">
-                {filteredCloudTitles.map((title) => {
-                  const checkoutOwner = title.checkedOutByUserId
-                    ? appState.users.find((user) => user.id === title.checkedOutByUserId)?.displayName ?? "Unknown user"
-                    : null;
+              <div className="library-layout">
+                <div className="title-list library-title-list">
+                  {filteredCloudTitles.map((title) => {
+                    const checkoutOwner = title.checkedOutByUserId
+                      ? appState.users.find((user) => user.id === title.checkedOutByUserId)?.displayName ?? "Unknown user"
+                      : null;
+                    const checkoutStateClass =
+                      title.checkedOutByUserId === currentUser?.id
+                        ? "checked-out-self"
+                        : title.checkedOutByUserId
+                          ? "checked-out-other locked"
+                          : "checked-in";
 
-                  return (
-                    <button
-                      className={`title-card ${selectedTitle?.id === title.id ? "active" : ""} ${
-                        title.checkedOutByUserId && title.checkedOutByUserId !== currentUser.id ? "locked" : ""
-                      }`}
-                      key={title.id}
-                      onClick={() => void focusSharedTitle(title.id)}
-                      type="button"
-                    >
-                      <div className="title-card-top">
-                        <strong>{title.title || title.videoId}</strong>
-                        <span className={`pill ${title.checkedOutByUserId ? "accent" : ""}`}>{getTitleStateLabel(title)}</span>
+                    return (
+                      <button
+                        className={`title-card library-title-card ${selectedTitle?.id === title.id ? "active" : ""} ${checkoutStateClass}`}
+                        key={title.id}
+                        onClick={() => void focusSharedTitle(title.id)}
+                        type="button"
+                      >
+                        <div className="title-card-top">
+                          <strong>{title.title || title.videoId}</strong>
+                          <span className={`pill ${title.checkedOutByUserId ? "accent" : ""}`}>{getTitleStateLabel(title)}</span>
+                        </div>
+                        <span>{title.source}</span>
+                        <div className="title-meta">
+                          <span>{title.videoId}</span>
+                          <span>{title.sizeLabel}</span>
+                        </div>
+                        <div className="title-meta">
+                          <span>Uploaded {formatTimestamp(title.uploadedAt)}</span>
+                          <span>{checkoutOwner ? `Checked out by ${checkoutOwner}` : "Available for checkout"}</span>
+                        </div>
+                      </button>
+                    );
+                  })}
+                </div>
+
+                {selectedTitle ? (
+                  <article className="library-detail-card">
+                    <div className="card-header">
+                      <div>
+                        <span className="eyebrow">Selected Title</span>
+                        <h3>{selectedTitle.title || selectedTitle.videoId}</h3>
                       </div>
-                      <span>{title.source}</span>
-                      <div className="title-meta">
-                        <span>{title.videoId}</span>
-                        <span>{title.sizeLabel}</span>
+                      <span className={`pill ${selectedTitle.checkedOutByUserId ? "accent" : ""}`}>{getTitleStateLabel(selectedTitle)}</span>
+                    </div>
+                    <div className="library-detail-grid">
+                      <div className="field">
+                        <span>Source</span>
+                        <strong>{selectedTitle.source}</strong>
                       </div>
-                      <div className="title-meta">
-                        <span>Uploaded {formatTimestamp(title.uploadedAt)}</span>
-                        <span>{checkoutOwner ? `Checked out by ${checkoutOwner}` : "Available for checkout"}</span>
+                      <div className="field">
+                        <span>Video ID</span>
+                        <strong>{selectedTitle.videoId}</strong>
                       </div>
-                    </button>
-                  );
-                })}
+                      <div className="field">
+                        <span>Language</span>
+                        <strong>{selectedTitle.language}</strong>
+                      </div>
+                      <div className="field">
+                        <span>Size</span>
+                        <strong>{selectedTitle.sizeLabel}</strong>
+                      </div>
+                      <div className="field">
+                        <span>Uploaded</span>
+                        <strong>{formatTimestamp(selectedTitle.uploadedAt)}</strong>
+                      </div>
+                      <div className="field">
+                        <span>Duration</span>
+                        <strong>{selectedTitle.duration > 0 ? formatTime(selectedTitle.duration) : "Unknown"}</strong>
+                      </div>
+                    </div>
+                    <div className="helper-text">
+                      {selectedLibraryCheckoutOwner
+                        ? selectedTitle.checkedOutByUserId === currentUser?.id
+                          ? "You currently hold the checkout for this title."
+                          : `Checked out by ${selectedLibraryCheckoutOwner}.`
+                        : "This title is currently checked in and available."}
+                    </div>
+                    <div className="action-cluster">
+                      <button
+                        className="toolbar-button"
+                        onClick={() => void checkout(selectedTitle.id)}
+                        type="button"
+                        disabled={!canCheckoutTitle(selectedTitle)}
+                      >
+                        {selectedTitle.checkedOutByUserId === currentUser?.id ? "Checked Out" : "Check Out"}
+                      </button>
+                      <button
+                        className="toolbar-button"
+                        onClick={() => void sync(selectedTitle.id)}
+                        type="button"
+                        disabled={!canSyncTitle(selectedTitle)}
+                      >
+                        Sync Checked Out
+                      </button>
+                      <button
+                        className="toolbar-button"
+                        onClick={() => void checkIn(selectedTitle.id)}
+                        type="button"
+                        disabled={!canCheckInTitle(selectedTitle)}
+                      >
+                        Check In
+                      </button>
+                      {currentUser?.role === "admin" ? (
+                        <>
+                          <button
+                            className="toolbar-button"
+                            onClick={() => void forceCheckIn(selectedTitle.id)}
+                            type="button"
+                            disabled={!canForceCheckInTitle(selectedTitle)}
+                          >
+                            Admin Force Check In
+                          </button>
+                          <button
+                            className="toolbar-button"
+                            onClick={() => void takeOver(selectedTitle.id)}
+                            type="button"
+                            disabled={!canTakeOverTitle(selectedTitle)}
+                          >
+                            Admin Take Over
+                          </button>
+                          <button className="toolbar-button danger" onClick={() => void deleteTitle(selectedTitle.id)} type="button">
+                            Delete Title
+                          </button>
+                        </>
+                      ) : null}
+                    </div>
+                    <div className="helper-text">{getTitleHeaderSuffix(selectedTitle)}</div>
+                  </article>
+                ) : null}
               </div>
             )}
           </section>
-
-          <div className="shared-table">
-            <div className="shared-head">
-              <span>Title / Video ID</span>
-              <span>Size</span>
-              <span>Uploaded</span>
-              <span>Status</span>
-              <span>Actions</span>
-            </div>
-            {libraryTitles.map((title) => (
-              <div className={`shared-row ${selectedTitle?.id === title.id ? "active" : ""}`} key={title.id}>
-                <div>
-                  <strong>{title.title || title.videoId}</strong>
-                  <span>{title.source}</span>
-                  <span>{title.videoId}</span>
-                </div>
-                <span>{title.sizeLabel}</span>
-                <span>{formatTimestamp(title.uploadedAt)}</span>
-                <span>{getTitleStateLabel(title)}</span>
-                <div className="action-cluster">
-                  <button
-                    className="toolbar-button"
-                    onClick={() => void checkout(title.id)}
-                    type="button"
-                    disabled={!canCheckoutTitle(title)}
-                  >
-                    {title.checkedOutByUserId === currentUser?.id ? "Checked Out" : "Check Out"}
-                  </button>
-                  <button className="toolbar-button" onClick={() => void sync(title.id)} type="button" disabled={!canSyncTitle(title)}>
-                    Sync Checked Out
-                  </button>
-                  <button className="toolbar-button" onClick={() => void checkIn(title.id)} type="button" disabled={!canCheckInTitle(title)}>
-                    Check In
-                  </button>
-                  {currentUser.role === "admin" ? (
-                    <>
-                      <button
-                        className="toolbar-button"
-                        onClick={() => void forceCheckIn(title.id)}
-                        type="button"
-                        disabled={!canForceCheckInTitle(title)}
-                      >
-                        Admin Force Check In
-                      </button>
-                      <button
-                        className="toolbar-button"
-                        onClick={() => void takeOver(title.id)}
-                        type="button"
-                        disabled={!canTakeOverTitle(title)}
-                      >
-                        Admin Take Over
-                      </button>
-                      <button className="toolbar-button danger" onClick={() => void deleteTitle(title.id)} type="button">
-                        Delete from Cloud
-                      </button>
-                    </>
-                  ) : null}
-                </div>
-              </div>
-            ))}
-          </div>
 
           <div className="audit-grid">
             <section className="card">

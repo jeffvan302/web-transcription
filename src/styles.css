@@ -489,6 +489,18 @@ h3 {
   opacity: 0.82;
 }
 
+.title-card.checked-out-self,
+.title-card.checked-out-self.active {
+  border-color: rgba(204, 244, 107, 0.4);
+  background: linear-gradient(145deg, rgba(44, 67, 31, 0.96), rgba(28, 45, 24, 0.88));
+}
+
+.title-card.checked-out-other,
+.title-card.checked-out-other.active {
+  border-color: rgba(255, 184, 111, 0.42);
+  background: linear-gradient(145deg, rgba(70, 45, 21, 0.96), rgba(45, 29, 16, 0.88));
+}
+
 .status-dot {
   width: 0.72rem;
   height: 0.72rem;
@@ -655,6 +667,38 @@ h3 {
   margin-bottom: 1rem;
 }
 
+.library-layout {
+  display: grid;
+  gap: 1rem;
+  grid-template-columns: minmax(280px, 0.9fr) minmax(0, 1.35fr);
+  align-items: start;
+}
+
+.library-title-list {
+  max-height: 620px;
+  overflow: auto;
+  padding-right: 0.3rem;
+}
+
+.library-title-card {
+  width: 100%;
+}
+
+.library-detail-card {
+  display: grid;
+  gap: 1rem;
+  padding: 1rem;
+  border-radius: 24px;
+  border: 1px solid var(--line);
+  background: rgba(17, 27, 39, 0.78);
+}
+
+.library-detail-grid {
+  display: grid;
+  gap: 0.9rem;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+}
+
 .cloud-list-grid {
   grid-template-columns: repeat(auto-fit, minmax(240px, 1fr));
 }
@@ -767,6 +811,8 @@ h3 {
   .editor-controls,
   .settings-grid,
   .audit-grid,
+  .library-layout,
+  .library-detail-grid,
   .settings-form,
   .timing-grid,
   .user-maintenance-layout {
