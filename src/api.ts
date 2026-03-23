@@ -170,6 +170,11 @@ export const api = {
       body: formData,
     });
   },
+  queueWaveformRebuild(titleId: string) {
+    return requestJson<{ job: JobRecord }>(`/api/titles/${titleId}/rebuild-waveform`, {
+      method: "POST",
+    });
+  },
   saveStorage(settings: StorageConfig, accessKeyId?: string, secretAccessKey?: string) {
     return requestJson<{ storage: StorageConfig }>("/api/admin/storage", {
       method: "PUT",

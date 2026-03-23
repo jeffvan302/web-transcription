@@ -116,6 +116,48 @@ function formatTimestamp(value: string | null) {
   }).format(new Date(value));
 }
 
+function getVisibleWaveformImages(title: TitleRecord | null, visibleStart: number, visibleEnd: number) {
+  if (!title?.waveformUrl) {
+    return [];
+  }
+  const waveformVersion = encodeURIComponent(title.updatedAt || title.uploadedAt || "0");
+
+  if (title.waveformMode !== "tiled") {
+    return [
+      {
+        key: `${title.id}-waveform-single`,
+        url: `${title.waveformUrl}?v=${waveformVersion}`,
+        startTime: 0,
+        duration: Math.max(0.1, title.duration || visibleEnd - visibleStart || 0.1),
+      },
+    ];
+  }
+
+  const tileCount = Math.max(0, title.waveformTileCount || 0);
+  const tileDurationSeconds = Math.max(1, title.waveformTileDurationSeconds || 60);
+  const visibleTiles = [];
+
+  for (let index = 0; index < tileCount; index += 1) {
+    const startTime = index * tileDurationSeconds;
+    const duration = Math.max(0, Math.min(tileDurationSeconds, (title.duration || 0) - startTime));
+    if (duration <= 0) {
+      continue;
+    }
+    if (startTime >= visibleEnd || startTime + duration <= visibleStart) {
+      continue;
+    }
+
+    visibleTiles.push({
+      key: `${title.id}-waveform-${index}`,
+      url: `${title.waveformUrl}?tile=${index}&v=${waveformVersion}`,
+      startTime,
+      duration,
+    });
+  }
+
+  return visibleTiles;
+}
+
 function formatKeepAwakeReason(reason: PersistedState["runtime"]["reason"], activeJobCount: number) {
   if (reason === "admin") {
     return "Manual admin override";
@@ -389,6 +431,12 @@ export default function App() {
   const canEdit = editable && !saveInFlight && !passwordChangeRequired;
   const activeCheckedOutTitleId = appState.titles.find((title) => title.checkedOutByUserId === currentUser?.id)?.id ?? null;
   const hasActiveJobs = jobs.some((job) => job.status === "queued" || job.status === "running");
+  const activeWaveformRebuildJob =
+    selectedTitle
+      ? jobs.find(
+          (job) => job.type === "waveform_rebuild" && job.titleId === selectedTitle.id && (job.status === "queued" || job.status === "running"),
+        ) ?? null
+      : null;
   const viewRange = selectedTitle ? getWaveViewRange(selectedTitle.duration, waveWindowSeconds) : 10;
   const visibleStart = clamp(wavePan, 0, Math.max(0, (selectedTitle?.duration ?? 0) - viewRange));
   const visibleEnd = visibleStart + viewRange;
@@ -2080,6 +2128,30 @@ export default function App() {
     }
   }
 
+  async function queueWaveformRebuild(titleId: string) {
+    if (!currentUser) {
+      return;
+    }
+
+    const target = appState.titles.find((title) => title.id === titleId);
+    if (!target) {
+      postStatus("warning", "Select a title before rebuilding the waveform.");
+      return;
+    }
+    if (!target.audioUrl) {
+      postStatus("warning", "This title does not have stored audio yet, so there is no waveform to rebuild.");
+      return;
+    }
+
+    try {
+      const response = await api.queueWaveformRebuild(titleId);
+      setJobs((current) => [response.job, ...current.filter((job) => job.id !== response.job.id)].slice(0, 30));
+      postStatus("info", `Waveform rebuild queued for ${target.title}.`);
+    } catch (error) {
+      postStatus("error", error instanceof Error ? error.message : "Waveform rebuild failed to queue.");
+    }
+  }
+
   async function deleteTitle(titleId: string) {
     if (!currentUser || currentUser.role !== "admin") {
       return;
@@ -2228,10 +2300,7 @@ export default function App() {
     playheadTime !== null && selectedTitle && playheadTime >= visibleStart && playheadTime <= visibleEnd
       ? ((playheadTime - visibleStart) / viewRange) * waveformWidth
       : null;
-  const waveformImageScale = selectedTitle ? Math.max(1, selectedTitle.duration / viewRange) : 1;
-  const waveformImageWidth = waveformWidth * waveformImageScale;
-  const waveformImageX =
-    selectedTitle && selectedTitle.duration > 0 ? -((visibleStart / selectedTitle.duration) * waveformImageWidth) : 0;
+  const visibleWaveformImages = getVisibleWaveformImages(selectedTitle, visibleStart, visibleEnd);
   const waveformClipId = "editor-waveform-clip";
   const waveWindowSliderMin = selectedTitle ? getWaveMinVisibleRange(selectedTitle.duration) : MIN_WAVE_WINDOW_SECONDS;
   const waveWindowSliderMax = selectedTitle
@@ -2634,17 +2703,27 @@ export default function App() {
                     <span className="eyebrow">Waveform</span>
                     <h3>Phrase Timing Editor</h3>
                   </div>
-                  <label className="field compact waveform-zoom-field">
-                    <span>Visible time {viewRange.toFixed(1)}s</span>
-                    <input
-                      type="range"
-                      min={waveWindowSliderMin}
-                      max={waveWindowSliderMax}
-                      step="0.5"
-                      value={viewRange}
-                      onChange={(event) => updateWaveWindow(Number(event.target.value))}
-                    />
-                  </label>
+                  <div className="button-row">
+                    <button
+                      className="toolbar-button"
+                      onClick={() => void queueWaveformRebuild(selectedTitle.id)}
+                      type="button"
+                      disabled={!selectedTitle.audioUrl || Boolean(activeWaveformRebuildJob)}
+                    >
+                      {activeWaveformRebuildJob ? "Rebuilding..." : "Rebuild Waveform"}
+                    </button>
+                    <label className="field compact waveform-zoom-field">
+                      <span>Visible time {viewRange.toFixed(1)}s</span>
+                      <input
+                        type="range"
+                        min={waveWindowSliderMin}
+                        max={waveWindowSliderMax}
+                        step="0.5"
+                        value={viewRange}
+                        onChange={(event) => updateWaveWindow(Number(event.target.value))}
+                      />
+                    </label>
+                  </div>
                 </div>
 
                 <svg
@@ -2665,17 +2744,20 @@ export default function App() {
                     </clipPath>
                   </defs>
                   <rect x="0" y="0" width={waveformWidth} height={waveformHeight} rx="18" className="waveform-base" />
-                  {selectedTitle.waveformUrl ? (
+                  {visibleWaveformImages.length > 0 ? (
                     <g clipPath={`url(#${waveformClipId})`}>
-                      <image
-                        href={selectedTitle.waveformUrl}
-                        x={waveformImageX}
-                        y="0"
-                        width={waveformImageWidth}
-                        height={waveformHeight}
-                        preserveAspectRatio="none"
-                        className="waveform-image"
-                      />
+                      {visibleWaveformImages.map((image) => (
+                        <image
+                          key={image.key}
+                          href={image.url}
+                          x={((image.startTime - visibleStart) / viewRange) * waveformWidth}
+                          y="0"
+                          width={(image.duration / viewRange) * waveformWidth}
+                          height={waveformHeight}
+                          preserveAspectRatio="none"
+                          className="waveform-image"
+                        />
+                      ))}
                     </g>
                   ) : (
                     <>

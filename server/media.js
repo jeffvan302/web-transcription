@@ -3,6 +3,11 @@ import path from "node:path";
 import { spawn } from "node:child_process";
 import { appConfig } from "./config.js";
 import { ensureDir } from "./helpers.js";
+import {
+  WAVEFORM_TILE_DURATION_SECONDS,
+  WAVEFORM_TILE_HEIGHT,
+  WAVEFORM_TILE_WIDTH,
+} from "./waveform-tiles.js";
 
 export function runProcess(command, args, options = {}) {
   return new Promise((resolve, reject) => {
@@ -111,6 +116,51 @@ export async function generateWaveform(audioPath, outputPath) {
     outputPath,
   ]);
   return outputPath;
+}
+
+export async function generateWaveformTiles(audioPath, outputDir, totalDuration = 0) {
+  ensureDir(outputDir);
+  const duration = Math.max(0, Number(totalDuration) || (await getMediaDuration(audioPath)) || 0);
+  if (duration <= 0) {
+    return [];
+  }
+
+  const tileCount = Math.ceil(duration / WAVEFORM_TILE_DURATION_SECONDS);
+  const tiles = [];
+
+  for (let index = 0; index < tileCount; index += 1) {
+    const startSeconds = index * WAVEFORM_TILE_DURATION_SECONDS;
+    const tileDuration = Math.max(0, Math.min(WAVEFORM_TILE_DURATION_SECONDS, duration - startSeconds));
+    if (tileDuration <= 0) {
+      continue;
+    }
+
+    const width = Math.max(320, Math.round((tileDuration / WAVEFORM_TILE_DURATION_SECONDS) * WAVEFORM_TILE_WIDTH));
+    const outputPath = path.join(outputDir, `${String(index).padStart(4, "0")}.png`);
+    await runProcess(appConfig.ffmpegPath, [
+      "-y",
+      "-ss",
+      String(startSeconds),
+      "-t",
+      String(tileDuration),
+      "-i",
+      audioPath,
+      "-filter_complex",
+      `showwavespic=s=${width}x${WAVEFORM_TILE_HEIGHT}:colors=0x6db5ff:filter=peak:draw=full:scale=sqrt`,
+      "-frames:v",
+      "1",
+      outputPath,
+    ]);
+
+    tiles.push({
+      index,
+      startSeconds,
+      durationSeconds: tileDuration,
+      outputPath,
+    });
+  }
+
+  return tiles;
 }
 
 export async function getMediaDuration(filePath) {

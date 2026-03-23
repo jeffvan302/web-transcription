@@ -55,6 +55,7 @@ export interface TitleRecord {
   duration: number;
   sourceType: SourceType;
   uploadedAt: string;
+  updatedAt?: string;
   sizeLabel: string;
   checkedOutByUserId: string | null;
   checkedOutAt: string | null;
@@ -64,6 +65,9 @@ export interface TitleRecord {
   badge: "reviewed" | "downloaded" | null;
   audioUrl?: string | null;
   waveformUrl?: string | null;
+  waveformMode?: "single" | "tiled" | null;
+  waveformTileCount?: number;
+  waveformTileDurationSeconds?: number;
 }
 
 export interface AuditRecord {
@@ -85,7 +89,8 @@ export interface AuditRecord {
     | "force_checkin"
     | "takeover"
     | "title_delete"
-    | "export";
+    | "export"
+    | "waveform_rebuild";
   titleId: string | null;
   titleName: string;
   actorUserId: string;
@@ -129,7 +134,7 @@ export interface RuntimeControlState {
 
 export interface JobRecord {
   id: string;
-  type: "youtube_import" | "media_import" | "asr_import";
+  type: "youtube_import" | "media_import" | "asr_import" | "waveform_rebuild";
   status: "queued" | "running" | "completed" | "failed";
   createdByUserId: string;
   titleId: string | null;

@@ -19,6 +19,7 @@ import {
   deleteSession,
   deleteTitleRecord,
   findUserByIdentifier,
+  findActiveJobForTitle,
   getActiveCheckoutForUser,
   getDraftForTitle,
   getSessionWithUser,
@@ -49,6 +50,12 @@ import { getObjectKey, getStorageService } from "./storage.js";
 import { getKeepAwakeStatus, noteKeepAwakeActivity, startKeepAwakeManager, triggerKeepAwakeCheck } from "./keep-awake.js";
 import { deleteTitleSentenceState, persistTitleSentenceState } from "./title-state.js";
 import { createCookieOptions, ensureDir, nowIso, parseJson, randomId, sanitizeFileSegment } from "./helpers.js";
+import { deleteWaveformArtifacts, ensureTiledWaveformArtifacts } from "./waveform-artifacts.js";
+import {
+  decodeWaveformTilePrefix,
+  getWaveformTileCount,
+  WAVEFORM_TILE_DURATION_SECONDS,
+} from "./waveform-tiles.js";
 
 const app = express();
 
@@ -906,6 +913,41 @@ app.post("/api/titles/:titleId/save", requireUser, async (req, res, next) => {
   }
 });
 
+app.post("/api/titles/:titleId/rebuild-waveform", requireUser, (req, res) => {
+  try {
+    const titleRow = getTitleRow(req.params.titleId);
+    if (!titleRow) {
+      res.status(404).json({ error: "Title not found." });
+      return;
+    }
+    if (!titleRow.audio_object_key) {
+      res.status(400).json({ error: "Audio not available for waveform rebuild." });
+      return;
+    }
+
+    const existingJob = findActiveJobForTitle("waveform_rebuild", titleRow.id);
+    if (existingJob) {
+      res.status(409).json({ error: "A waveform rebuild is already queued or running for this title." });
+      return;
+    }
+
+    const job = createJob(
+      "waveform_rebuild",
+      req.user.id,
+      {
+        titleId: titleRow.id,
+        actorDisplayName: req.user.displayName,
+      },
+      titleRow.id,
+      titleRow.workspace_id || null,
+    );
+    triggerKeepAwakeCheck();
+    res.status(202).json({ job });
+  } catch (error) {
+    res.status(400).json({ error: error instanceof Error ? error.message : "Could not queue waveform rebuild." });
+  }
+});
+
 app.post("/api/titles/:titleId/force-checkin", requireAdmin, async (req, res, next) => {
   try {
     const titleRow = getTitleRow(req.params.titleId);
@@ -1030,9 +1072,10 @@ app.delete("/api/titles/:titleId", requireAdmin, async (req, res, next) => {
     }
 
     const storage = getStorageService();
-    for (const key of [titleRow.audio_object_key, titleRow.waveform_object_key, titleRow.latest_asr_object_key].filter(Boolean)) {
+    for (const key of [titleRow.audio_object_key, titleRow.latest_asr_object_key].filter(Boolean)) {
       await storage.deleteObject(key);
     }
+    await deleteWaveformArtifacts(titleRow);
     await deleteTitleSentenceState(titleRow.id);
 
     deleteTitleRecord(titleRow.id);
@@ -1307,20 +1350,47 @@ app.get("/api/titles/:titleId/audio", requireUser, async (req, res, next) => {
 
 app.get("/api/titles/:titleId/waveform", requireUser, async (req, res, next) => {
   try {
-    const titleRow = getTitleRow(req.params.titleId);
-    if (!titleRow?.waveform_object_key) {
+    let titleRow = getTitleRow(req.params.titleId);
+    const waveformTileRequest =
+      req.query?.tile !== undefined || (Number(titleRow?.duration || 0) > WAVEFORM_TILE_DURATION_SECONDS && Boolean(titleRow?.audio_object_key));
+    if (!titleRow?.waveform_object_key && !waveformTileRequest) {
+      res.status(404).json({ error: "Waveform not available." });
+      return;
+    }
+
+    let waveformTilePrefix = decodeWaveformTilePrefix(titleRow?.waveform_object_key);
+    if (!waveformTilePrefix && waveformTileRequest) {
+      const ensured = await ensureTiledWaveformArtifacts(titleRow);
+      waveformTilePrefix = ensured?.waveformTilePrefix || null;
+      titleRow = ensured?.titleRow || titleRow;
+    }
+
+    const tileParam = req.query?.tile;
+    let waveformObjectKey = titleRow?.waveform_object_key;
+
+    if (waveformTilePrefix) {
+      const tileIndex = Number.parseInt(String(tileParam ?? "0"), 10);
+      const tileCount = getWaveformTileCount(titleRow?.duration);
+    if (!Number.isInteger(tileIndex) || tileIndex < 0 || tileIndex >= tileCount) {
+      res.status(404).json({ error: "Waveform tile not found." });
+      return;
+    }
+      waveformObjectKey = `${waveformTilePrefix}/${String(tileIndex).padStart(4, "0")}.png`;
+    }
+    if (!waveformObjectKey) {
       res.status(404).json({ error: "Waveform not available." });
       return;
     }
 
     const storage = getStorageService();
+    res.type("image/png");
     if (storage.mode === "local") {
-      res.sendFile(storage.resolveLocalPath(titleRow.waveform_object_key));
+      res.sendFile(storage.resolveLocalPath(waveformObjectKey));
       return;
     }
 
-    const buffer = await storage.getBuffer(titleRow.waveform_object_key);
-    res.type("image/png").send(buffer);
+    const buffer = await storage.getBuffer(waveformObjectKey);
+    res.send(buffer);
   } catch (error) {
     next(error);
   }

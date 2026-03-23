@@ -10,9 +10,9 @@ import {
   getDraftForTitle,
   getJob,
   getTitleByVideoId,
+  getTitleRow,
   insertAuditRecord,
   updateJobProgress,
-  updateTitleRecord,
 } from "./database.js";
 import { paths } from "./config.js";
 import { ensureDir, nowIso, parseJson, randomId, removeIfExists, slugify } from "./helpers.js";
@@ -21,7 +21,7 @@ import {
   downloadYouTubeAudio,
   extractEmbeddedSubtitle,
   extractWorkingAudio,
-  generateWaveform,
+  generateWaveformTiles,
   getMediaDuration,
   getYouTubeMetadata,
   listSubtitleStreams,
@@ -31,6 +31,8 @@ import { getObjectKey, getStorageService } from "./storage.js";
 import { persistTitleSentenceState } from "./title-state.js";
 import { parseSubtitleFile } from "./subtitles.js";
 import { transcribeAudio } from "./transcription.js";
+import { buildWaveformTileObjectKey, encodeWaveformTilePrefix } from "./waveform-tiles.js";
+import { rebuildWaveformArtifactsForTitle } from "./waveform-artifacts.js";
 
 function withUniqueVideoId(videoId, workspaceId = null) {
   if (!getTitleByVideoId(videoId, workspaceId)) {
@@ -40,16 +42,21 @@ function withUniqueVideoId(videoId, workspaceId = null) {
   return `${videoId}-${Date.now().toString(36)}`;
 }
 
-async function persistArtifacts(titleId, audioPath, waveformPath) {
+async function persistArtifacts(titleId, audioPath, waveformTiles) {
   const storage = getStorageService();
   const audioObjectKey = audioPath ? getObjectKey("artifacts", titleId, "working_audio.wav") : null;
-  const waveformObjectKey = waveformPath ? getObjectKey("artifacts", titleId, "waveform.png") : null;
+  let waveformObjectKey = null;
 
   if (audioPath) {
     await storage.putFile(audioObjectKey, audioPath, "audio/wav");
   }
-  if (waveformPath) {
-    await storage.putFile(waveformObjectKey, waveformPath, "image/png");
+  if (Array.isArray(waveformTiles) && waveformTiles.length > 0) {
+    const waveformTilePrefix = getObjectKey("artifacts", titleId, "waveform_tiles");
+    for (const tile of waveformTiles) {
+      const tileObjectKey = buildWaveformTileObjectKey(waveformTilePrefix, tile.index);
+      await storage.putFile(tileObjectKey, tile.outputPath, "image/png");
+    }
+    waveformObjectKey = encodeWaveformTilePrefix(waveformTilePrefix);
   }
 
   return { audioObjectKey, waveformObjectKey };
@@ -67,11 +74,11 @@ async function finalizeImportedTitle(job, payload) {
 
   const audioPath = payload.audioFilePath || null;
   const duration = payload.duration || (audioPath ? await getMediaDuration(audioPath) : 0);
-  let waveformPath = null;
+  let waveformTiles = [];
   if (audioPath) {
-    waveformPath = path.join(workDir, "waveform.png");
+    const waveformDir = path.join(workDir, "waveform");
     updateJobProgress(job.id, 82, "Rendering waveform");
-    await generateWaveform(audioPath, waveformPath);
+    waveformTiles = await generateWaveformTiles(audioPath, waveformDir, duration);
   }
 
   const titleId = randomId("title");
@@ -81,7 +88,7 @@ async function finalizeImportedTitle(job, payload) {
   const autoCheckout = !activeCheckout;
 
   updateJobProgress(job.id, 90, "Persisting title");
-  const { audioObjectKey, waveformObjectKey } = await persistArtifacts(titleId, audioPath, waveformPath);
+  const { audioObjectKey, waveformObjectKey } = await persistArtifacts(titleId, audioPath, waveformTiles);
 
   const createdTitle = createTitleRecord({
     id: titleId,
@@ -235,6 +242,36 @@ async function processAsrImport(job) {
   });
 }
 
+async function processWaveformRebuild(job) {
+  const payload = job.payload || {};
+  const titleRow = getTitleRow(payload.titleId || job.titleId);
+  if (!titleRow) {
+    throw new Error("Title not found.");
+  }
+  if (!titleRow.audio_object_key) {
+    throw new Error("Audio not available for waveform rebuild.");
+  }
+
+  updateJobProgress(job.id, 25, "Preparing waveform rebuild", titleRow.id);
+  const rebuilt = await rebuildWaveformArtifactsForTitle(titleRow);
+  updateJobProgress(job.id, 90, "Waveform tiles refreshed", rebuilt.titleRow.id);
+
+  insertAuditRecord({
+    eventType: "waveform_rebuild",
+    titleId: rebuilt.titleRow.id,
+    titleName: rebuilt.titleRow.title,
+    actorUserId: job.createdByUserId,
+    actorDisplayName: payload.actorDisplayName || "User",
+    details: "Rebuilt the waveform artifacts from the stored audio.",
+  });
+
+  return {
+    titleId: rebuilt.titleRow.id,
+    videoId: rebuilt.titleRow.video_id,
+    title: rebuilt.titleRow.title,
+  };
+}
+
 async function processJob(job) {
   if (job.type === "youtube_import") {
     return processYoutubeImport(job);
@@ -244,6 +281,9 @@ async function processJob(job) {
   }
   if (job.type === "asr_import") {
     return processAsrImport(job);
+  }
+  if (job.type === "waveform_rebuild") {
+    return processWaveformRebuild(job);
   }
 
   throw new Error(`Unsupported job type: ${job.type}`);

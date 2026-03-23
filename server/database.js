@@ -3,6 +3,11 @@ import Database from "better-sqlite3";
 import bcrypt from "bcryptjs";
 import { appConfig, defaultStorageSettings, paths, seededUsers } from "./config.js";
 import { ensureDir, humanFileSize, normalizeEndpointUrl, nowIso, parseJson, randomId, slugify } from "./helpers.js";
+import {
+  decodeWaveformTilePrefix,
+  getWaveformTileCount,
+  WAVEFORM_TILE_DURATION_SECONDS,
+} from "./waveform-tiles.js";
 
 ensureDir(paths.dataDir);
 
@@ -1184,6 +1189,11 @@ function serializeTitleForUser(titleRow, currentUserId) {
   const phrases = owner && draftRow ? parseJson(draftRow.phrases_json, []) : parseJson(titleRow.phrases_json, []);
   const savedSnapshot =
     owner && draftRow ? parseJson(draftRow.saved_snapshot_json, []) : parseJson(titleRow.saved_snapshot_json, []);
+  const waveformTilePrefix = decodeWaveformTilePrefix(titleRow.waveform_object_key);
+  const canBackfillTiledWaveform = Boolean(titleRow.audio_object_key) && Number(titleRow.duration || 0) > WAVEFORM_TILE_DURATION_SECONDS;
+  const waveformUrl = titleRow.waveform_object_key || canBackfillTiledWaveform ? `/api/titles/${titleRow.id}/waveform` : null;
+  const waveformMode = waveformTilePrefix || canBackfillTiledWaveform ? "tiled" : titleRow.waveform_object_key ? "single" : null;
+  const waveformTileCount = waveformMode === "tiled" ? getWaveformTileCount(titleRow.duration) : waveformUrl ? 1 : 0;
 
   return {
     id: titleRow.id,
@@ -1194,6 +1204,7 @@ function serializeTitleForUser(titleRow, currentUserId) {
     duration: titleRow.duration,
     sourceType: titleRow.source_type,
     uploadedAt: titleRow.uploaded_at,
+    updatedAt: titleRow.updated_at,
     sizeLabel: humanFileSize(titleRow.size_bytes),
     checkedOutByUserId: titleRow.checked_out_by_user_id,
     checkedOutAt: titleRow.checked_out_at,
@@ -1202,7 +1213,10 @@ function serializeTitleForUser(titleRow, currentUserId) {
     draft: buildDraftMeta(titleRow, draftRow, owner),
     badge: titleRow.badge,
     audioUrl: titleRow.audio_object_key ? `/api/titles/${titleRow.id}/audio` : null,
-    waveformUrl: titleRow.waveform_object_key ? `/api/titles/${titleRow.id}/waveform` : null,
+    waveformUrl,
+    waveformMode,
+    waveformTileCount,
+    waveformTileDurationSeconds: waveformMode === "tiled" ? WAVEFORM_TILE_DURATION_SECONDS : Number(titleRow.duration || 0),
   };
 }
 
@@ -1439,6 +1453,16 @@ export function createJob(type, createdByUserId, payload, titleId = null, worksp
 
 export function getJob(jobId) {
   const row = db.prepare("SELECT * FROM jobs WHERE id = ?").get(jobId);
+  return row ? serializeJob(row) : null;
+}
+
+export function findActiveJobForTitle(type, titleId) {
+  if (!type || !titleId) {
+    return null;
+  }
+  const row = db
+    .prepare("SELECT * FROM jobs WHERE type = ? AND title_id = ? AND status IN ('queued', 'running') ORDER BY created_at DESC LIMIT 1")
+    .get(type, titleId);
   return row ? serializeJob(row) : null;
 }
 
