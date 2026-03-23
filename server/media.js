@@ -9,6 +9,9 @@ import {
   WAVEFORM_TILE_WIDTH,
 } from "./waveform-tiles.js";
 
+export const MONO_ARCHIVE_SAMPLE_RATE = 48000;
+export const MONO_ARCHIVE_CODEC = "pcm_s24le";
+
 export function runProcess(command, args, options = {}) {
   return new Promise((resolve, reject) => {
     const child = spawn(command, args, {
@@ -92,7 +95,9 @@ export async function extractWorkingAudio(inputPath, outputPath) {
     "-ac",
     "1",
     "-ar",
-    "16000",
+    String(MONO_ARCHIVE_SAMPLE_RATE),
+    "-c:a",
+    MONO_ARCHIVE_CODEC,
     outputPath,
   ]);
   return outputPath;

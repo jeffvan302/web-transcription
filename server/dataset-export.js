@@ -43,12 +43,10 @@ async function exportPhraseClip(audioFilePath, outputPath, startSeconds, duratio
     "-vn",
     "-ac",
     "1",
-    "-ar",
-    "16000",
     "-c:a",
     "libmp3lame",
     "-q:a",
-    "2",
+    "0",
     outputPath,
   ]);
 }
