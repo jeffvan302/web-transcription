@@ -113,6 +113,12 @@ function parseYouTubeEntries(value: string) {
   ];
 }
 
+function buildLanguageSuggestions(...sources: Array<readonly string[] | null | undefined>) {
+  return [...new Set(sources.flatMap((source) => source || []).map((value) => String(value || "").trim()).filter(Boolean))].sort(
+    (left, right) => left.localeCompare(right),
+  );
+}
+
 const MIN_WAVE_WINDOW_SECONDS = 1;
 const MAX_WAVE_WINDOW_SECONDS = 45;
 
@@ -286,6 +292,7 @@ export default function App() {
   const [mediaTitle, setMediaTitle] = useState("");
   const [mediaSource, setMediaSource] = useState("");
   const [mediaLanguage, setMediaLanguage] = useState("en");
+  const [probedImportLanguages, setProbedImportLanguages] = useState<string[]>([]);
   const [mediaFile, setMediaFile] = useState<File | null>(null);
   const [subtitleFile, setSubtitleFile] = useState<File | null>(null);
   const [mediaProbeToken, setMediaProbeToken] = useState("");
@@ -361,6 +368,7 @@ export default function App() {
     }
     return [title.title, title.source, title.videoId].some((value) => value.toLowerCase().includes(query));
   });
+  const languageSuggestions = buildLanguageSuggestions(LANGUAGES, probedImportLanguages, [appState.importLanguage], [mediaLanguage]);
 
   useEffect(() => {
     void hydrateSession();
@@ -946,6 +954,7 @@ export default function App() {
     setMediaTitle("");
     setMediaSource("");
     setMediaLanguage("en");
+    setProbedImportLanguages([]);
     setMediaFile(null);
     setSubtitleFile(null);
     setMediaProbeToken("");
@@ -1982,11 +1991,14 @@ export default function App() {
 
     try {
       const response = await api.probeLanguages(urls[0]);
+      setProbedImportLanguages(response.languages);
       postStatus(
         "info",
         response.languages.length > 0
-          ? `Available subtitle languages for the first URL: ${response.languages.join(", ")}.`
-          : "No subtitle languages were reported for that YouTube title.",
+          ? `Loaded ${response.languages.length} subtitle language suggestion${
+              response.languages.length === 1 ? "" : "s"
+            } from the first URL. Pick one from Language or type a custom code.`
+          : "No subtitle languages were reported for that YouTube title. The import can still continue without subtitles.",
       );
     } catch (error) {
       postStatus("error", error instanceof Error ? error.message : "Language probe failed.");
@@ -2255,16 +2267,17 @@ export default function App() {
               </label>
               <label className="field compact">
                 <span>Language</span>
-                <select
+                <input
+                  list="import-language-suggestions"
                   value={appState.importLanguage}
                   onChange={(event) => updateState((current) => ({ ...current, importLanguage: event.target.value }))}
-                >
-                  {LANGUAGES.map((language) => (
-                    <option key={language} value={language}>
-                      {language}
-                    </option>
+                  placeholder="en"
+                />
+                <datalist id="import-language-suggestions">
+                  {languageSuggestions.map((language) => (
+                    <option key={language} value={language} />
                   ))}
-                </select>
+                </datalist>
               </label>
               <div className="topbar-menu-group">
                 <button className="toolbar-button primary" onClick={() => switchView("shared")} type="button" disabled={passwordChangeRequired}>
@@ -2784,6 +2797,11 @@ export default function App() {
                 />
               </label>
               <div className="helper-text">Queued URLs: {parseYouTubeEntries(appState.youtubeUrl).length}</div>
+              {probedImportLanguages.length > 0 ? (
+                <div className="helper-text">
+                  Probed subtitle languages loaded: {probedImportLanguages.length}. Pick one from Language or type a custom code.
+                </div>
+              ) : null}
             </div>
           </section>
 
@@ -2808,13 +2826,17 @@ export default function App() {
               </label>
               <label className="field">
                 <span>Language</span>
-                <select value={mediaLanguage} onChange={(event) => setMediaLanguage(event.target.value)}>
-                  {LANGUAGES.map((language) => (
-                    <option key={language} value={language}>
-                      {language}
-                    </option>
+                <input
+                  list="media-language-suggestions"
+                  value={mediaLanguage}
+                  onChange={(event) => setMediaLanguage(event.target.value)}
+                  placeholder="en"
+                />
+                <datalist id="media-language-suggestions">
+                  {languageSuggestions.map((language) => (
+                    <option key={language} value={language} />
                   ))}
-                </select>
+                </datalist>
               </label>
               <label className="field">
                 <span>Media File</span>

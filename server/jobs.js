@@ -130,10 +130,18 @@ async function processYoutubeImport(job) {
   let phrases = [];
   const subtitleSource = pickBestSubtitleSource(metadata, payload.language || "en");
   if (subtitleSource?.url) {
-    updateJobProgress(job.id, 20, "Downloading subtitle track");
-    const subtitleFilePath = path.join(workDir, `captions.${subtitleSource.ext || "json3"}`);
-    await downloadUrlToFile(subtitleSource.url, subtitleFilePath);
-    phrases = parseSubtitleFile(subtitleFilePath);
+    try {
+      updateJobProgress(job.id, 20, "Downloading subtitle track");
+      const subtitleFilePath = path.join(workDir, `captions.${subtitleSource.ext || "json3"}`);
+      await downloadUrlToFile(subtitleSource.url, subtitleFilePath);
+      phrases = parseSubtitleFile(subtitleFilePath);
+    } catch (error) {
+      console.warn(
+        `Skipping YouTube subtitle import for job ${job.id}; continuing without captions.`,
+        error instanceof Error ? error.message : error,
+      );
+      updateJobProgress(job.id, 30, "Subtitle track unavailable, continuing without captions");
+    }
   }
 
   updateJobProgress(job.id, 40, "Downloading YouTube audio");
