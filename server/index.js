@@ -31,6 +31,7 @@ import {
   redeemPasswordRecoveryToken,
   recoverInterruptedJobs,
   resetUserPassword,
+  saveKeepAwakeSettings,
   sanitizeUser,
   saveStorageSettings,
   setUserCurrentWorkspace,
@@ -44,6 +45,7 @@ import { listSubtitleStreams } from "./media.js";
 import { startJobWorker } from "./jobs.js";
 import { getYouTubeMetadata } from "./media.js";
 import { getObjectKey, getStorageService } from "./storage.js";
+import { getKeepAwakeStatus, noteKeepAwakeActivity, startKeepAwakeManager, triggerKeepAwakeCheck } from "./keep-awake.js";
 import { deleteTitleSentenceState, persistTitleSentenceState } from "./title-state.js";
 import { createCookieOptions, ensureDir, nowIso, parseJson, randomId } from "./helpers.js";
 
@@ -248,7 +250,10 @@ function syncWorkspaceToActiveCheckout(userId) {
 }
 
 function sendAppState(res, userId, preferredWorkspaceId = null) {
-  const state = buildAppState(userId, preferredWorkspaceId);
+  const state = {
+    ...buildAppState(userId, preferredWorkspaceId),
+    runtime: getKeepAwakeStatus(),
+  };
   res.json({
     state,
     jobs: listJobs(userId, 25, state.selectedWorkspaceId || null),
@@ -353,6 +358,10 @@ const reqUserDisplayNameCache = new Map();
 
 app.get("/api/health", (_req, res) => {
   res.json({ ok: true });
+});
+
+app.all("/api/internal/keepawake-ping", (_req, res) => {
+  res.status(204).end();
 });
 
 app.get("/api/auth/session", (req, res) => {
@@ -476,6 +485,11 @@ app.get("/api/jobs", requireUser, (req, res) => {
   res.json({ jobs: listJobs(req.user.id, 30, state.selectedWorkspaceId || null) });
 });
 
+app.post("/api/runtime/activity", requireUser, (_req, res) => {
+  noteKeepAwakeActivity();
+  res.json({ ok: true });
+});
+
 app.post("/api/workspaces/select", requireUser, (req, res) => {
   try {
     const workspaceId = String(req.body?.workspaceId || "").trim();
@@ -513,6 +527,14 @@ app.post("/api/admin/workspaces", requireAdmin, (req, res) => {
   } catch (error) {
     res.status(400).json({ error: error instanceof Error ? error.message : "Could not create workspace." });
   }
+});
+
+app.put("/api/admin/runtime/keep-awake", requireAdmin, (req, res) => {
+  saveKeepAwakeSettings({
+    adminKeepAwake: Boolean(req.body?.adminKeepAwake),
+  });
+  triggerKeepAwakeCheck();
+  sendAppState(res, req.user.id);
 });
 
 app.post("/api/admin/users", requireAdmin, (req, res) => {
@@ -970,6 +992,7 @@ app.post("/api/import/youtube", requireUser, (req, res) => {
       actorDisplayName: req.user.displayName,
     }, null, workspaceId),
   );
+  triggerKeepAwakeCheck();
   res.status(202).json({ jobs, job: jobs[0] || null });
 });
 
@@ -1028,6 +1051,7 @@ app.post(
       actorDisplayName: req.user.displayName,
     }, null, workspaceId);
     deleteMediaProbeManifest(req.body?.probeToken);
+    triggerKeepAwakeCheck();
     res.status(202).json({ job });
   },
 );
@@ -1045,6 +1069,7 @@ app.post("/api/import/asr", requireUser, upload.single("archive"), (req, res) =>
     workspaceId,
     actorDisplayName: req.user.displayName,
   }, null, workspaceId);
+  triggerKeepAwakeCheck();
 
   res.status(202).json({ job });
 });
@@ -1256,5 +1281,7 @@ recoverInterruptedJobs();
 startJobWorker();
 
 app.listen(appConfig.port, () => {
+  startKeepAwakeManager();
+  triggerKeepAwakeCheck();
   console.log(`yt-asr server listening on http://localhost:${appConfig.port}`);
 });

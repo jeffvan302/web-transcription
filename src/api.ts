@@ -60,6 +60,11 @@ export const api = {
   getJobs() {
     return requestJson<{ jobs: JobRecord[] }>("/api/jobs");
   },
+  reportActivity() {
+    return requestJson<{ ok: boolean }>("/api/runtime/activity", {
+      method: "POST",
+    });
+  },
   selectWorkspace(workspaceId: string) {
     return requestJson<AppStateResponse>("/api/workspaces/select", {
       method: "POST",
@@ -173,6 +178,12 @@ export const api = {
   testStorage() {
     return requestJson<{ ok: boolean; testedAt: string; storage: StorageConfig }>("/api/admin/storage/test", {
       method: "POST",
+    });
+  },
+  saveKeepAwake(adminKeepAwake: boolean) {
+    return requestJson<AppStateResponse>("/api/admin/runtime/keep-awake", {
+      method: "PUT",
+      body: JSON.stringify({ adminKeepAwake }),
     });
   },
   async probeLanguages(url: string) {

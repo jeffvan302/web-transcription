@@ -112,6 +112,21 @@ export interface StorageConfig {
   auditVisible: boolean;
 }
 
+export interface RuntimeControlState {
+  adminKeepAwake: boolean;
+  activeJobCount: number;
+  keepAwakeUntil: string | null;
+  keepAwakeActive: boolean;
+  heartbeatAvailable: boolean;
+  heartbeatUrl: string | null;
+  heartbeatIntervalSeconds: number;
+  activityWindowSeconds: number;
+  lastHeartbeatAt: string | null;
+  lastHeartbeatError: string | null;
+  reason: "idle" | "activity" | "jobs" | "admin";
+  updatedAt: string | null;
+}
+
 export interface JobRecord {
   id: string;
   type: "youtube_import" | "media_import" | "asr_import";
@@ -142,6 +157,7 @@ export interface PersistedState {
   users: User[];
   titles: TitleRecord[];
   storage: StorageConfig;
+  runtime: RuntimeControlState;
   audit: AuditRecord[];
 }
 

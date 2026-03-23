@@ -68,6 +68,20 @@ const EMPTY_STATE: PersistedState = {
     lastConnectionTestAt: null,
     auditVisible: true,
   },
+  runtime: {
+    adminKeepAwake: false,
+    activeJobCount: 0,
+    keepAwakeUntil: null,
+    keepAwakeActive: false,
+    heartbeatAvailable: false,
+    heartbeatUrl: null,
+    heartbeatIntervalSeconds: 60,
+    activityWindowSeconds: 75,
+    lastHeartbeatAt: null,
+    lastHeartbeatError: null,
+    reason: "idle",
+    updatedAt: null,
+  },
   audit: [],
 };
 
@@ -100,6 +114,29 @@ function formatTimestamp(value: string | null) {
     hour: "numeric",
     minute: "2-digit",
   }).format(new Date(value));
+}
+
+function formatKeepAwakeReason(reason: PersistedState["runtime"]["reason"], activeJobCount: number) {
+  if (reason === "admin") {
+    return "Manual admin override";
+  }
+  if (reason === "jobs") {
+    return activeJobCount === 1 ? "1 background job is active" : `${activeJobCount} background jobs are active`;
+  }
+  if (reason === "activity") {
+    return "Recent browser activity";
+  }
+  return "Idle";
+}
+
+function formatKeepAwakeWindow(runtime: PersistedState["runtime"]) {
+  if (runtime.adminKeepAwake) {
+    return "Manual override";
+  }
+  if (runtime.keepAwakeUntil) {
+    return formatTimestamp(runtime.keepAwakeUntil);
+  }
+  return "No active awake window";
 }
 
 function parseYouTubeEntries(value: string) {
@@ -332,6 +369,8 @@ export default function App() {
   const textDraftDirtyRef = useRef(false);
   const selectedPhraseRef = useRef<Phrase | null>(null);
   const playbackCommandRef = useRef<"pause" | "stop" | "phrase-end" | null>(null);
+  const lastUserActivityAtRef = useRef(Date.now());
+  const lastReportedActivityAtRef = useRef(0);
 
   const currentUser = appState.users.find((user) => user.id === appState.sessionUserId) ?? null;
   const selectedWorkspace =
@@ -349,6 +388,7 @@ export default function App() {
   const editable = Boolean(currentUser && selectedTitle?.checkedOutByUserId === currentUser.id);
   const canEdit = editable && !saveInFlight && !passwordChangeRequired;
   const activeCheckedOutTitleId = appState.titles.find((title) => title.checkedOutByUserId === currentUser?.id)?.id ?? null;
+  const hasActiveJobs = jobs.some((job) => job.status === "queued" || job.status === "running");
   const viewRange = selectedTitle ? getWaveViewRange(selectedTitle.duration, waveWindowSeconds) : 10;
   const visibleStart = clamp(wavePan, 0, Math.max(0, (selectedTitle?.duration ?? 0) - viewRange));
   const visibleEnd = visibleStart + viewRange;
@@ -403,6 +443,39 @@ export default function App() {
   useEffect(() => {
     selectedPhraseRef.current = selectedPhrase;
   }, [selectedPhrase]);
+
+  useEffect(() => {
+    if (!currentUser) {
+      lastUserActivityAtRef.current = 0;
+      lastReportedActivityAtRef.current = 0;
+      return;
+    }
+
+    const markActivity = () => {
+      lastUserActivityAtRef.current = Date.now();
+    };
+
+    const handleVisibilityChange = () => {
+      if (document.visibilityState === "visible") {
+        markActivity();
+      }
+    };
+
+    markActivity();
+    window.addEventListener("pointerdown", markActivity);
+    window.addEventListener("keydown", markActivity);
+    window.addEventListener("touchstart", markActivity);
+    window.addEventListener("focus", markActivity);
+    document.addEventListener("visibilitychange", handleVisibilityChange);
+
+    return () => {
+      window.removeEventListener("pointerdown", markActivity);
+      window.removeEventListener("keydown", markActivity);
+      window.removeEventListener("touchstart", markActivity);
+      window.removeEventListener("focus", markActivity);
+      document.removeEventListener("visibilitychange", handleVisibilityChange);
+    };
+  }, [currentUser?.id]);
 
   useEffect(() => {
     if (!topMenuOpen) {
@@ -717,6 +790,10 @@ export default function App() {
       return;
     }
 
+    if (!hasActiveJobs) {
+      return;
+    }
+
     let cancelled = false;
 
     const pollJobs = async () => {
@@ -761,7 +838,54 @@ export default function App() {
       cancelled = true;
       window.clearInterval(interval);
     };
-  }, [currentUser?.id]);
+  }, [currentUser?.id, hasActiveJobs]);
+
+  useEffect(() => {
+    if (!currentUser || !appState.runtime.heartbeatAvailable) {
+      return;
+    }
+
+    const activityWindowMs = Math.max(45_000, appState.runtime.activityWindowSeconds * 1000);
+    const signalIntervalMs = Math.max(30_000, Math.floor(activityWindowMs / 2));
+    const recentInteractionWindowMs = Math.max(45_000, activityWindowMs - 15_000);
+
+    const maybeReportActivity = async () => {
+      const now = Date.now();
+      const hasRecentInteraction = now - lastUserActivityAtRef.current < recentInteractionWindowMs;
+      const hasEditorActivity = Boolean(
+        playbackState === "playing" || textDraftDirtyRef.current || selectedTitle?.draft.isDirty || saveInFlight,
+      );
+      const shouldSignal = document.visibilityState === "visible" && (hasRecentInteraction || hasEditorActivity);
+
+      if (!shouldSignal || now - lastReportedActivityAtRef.current < signalIntervalMs - 1000) {
+        return;
+      }
+
+      lastReportedActivityAtRef.current = now;
+      try {
+        await api.reportActivity();
+      } catch {
+        // Ignore keep-awake activity failures; the next real request will wake the service if needed.
+      }
+    };
+
+    void maybeReportActivity();
+    const interval = window.setInterval(() => {
+      void maybeReportActivity();
+    }, signalIntervalMs);
+
+    return () => {
+      window.clearInterval(interval);
+    };
+  }, [
+    appState.runtime.activityWindowSeconds,
+    appState.runtime.heartbeatAvailable,
+    currentUser?.id,
+    playbackState,
+    saveInFlight,
+    selectedTitle?.id,
+    selectedTitle?.draft.isDirty,
+  ]);
 
   useEffect(() => {
     if (!currentUser) {
@@ -1190,10 +1314,6 @@ export default function App() {
       return false;
     }
     return title.checkedOutByUserId !== currentUser.id;
-  }
-
-  function canSyncTitle(title: TitleRecord) {
-    return Boolean(currentUser && !passwordChangeRequired && title.checkedOutByUserId === currentUser.id);
   }
 
   function canCheckInTitle(title: TitleRecord) {
@@ -1771,15 +1891,6 @@ export default function App() {
     }
   }
 
-  async function sync(titleId: string) {
-    if (!currentUser) {
-      return;
-    }
-
-    await commitText({ persist: false });
-    await saveTitle("sync", titleId);
-  }
-
   async function checkIn(titleId: string) {
     if (!currentUser) {
       return;
@@ -2051,6 +2162,26 @@ export default function App() {
     }
   }
 
+  async function saveKeepAwakeControl() {
+    if (!currentUser || currentUser.role !== "admin") {
+      return;
+    }
+
+    const manualKeepAwake = appState.runtime.adminKeepAwake;
+    try {
+      const response = await api.saveKeepAwake(manualKeepAwake);
+      applyServerResponse(response, { preserveView: true, preserveSelection: true });
+      postStatus(
+        "success",
+        manualKeepAwake
+          ? "Manual keep-awake is enabled. The server will keep heartbeating while idle."
+          : "Manual keep-awake is disabled. The server can sleep again once jobs and recent activity stop.",
+      );
+    } catch (error) {
+      postStatus("error", error instanceof Error ? error.message : "Could not update the keep-awake setting.");
+    }
+  }
+
   const selectedTitleState = selectedTitle ? getTitleStateLabel(selectedTitle) : "No title";
   const headerSuffix = selectedTitle ? getTitleHeaderSuffix(selectedTitle) : "";
   const waveformWidth = 760;
@@ -2169,8 +2300,8 @@ export default function App() {
             <h2>Desktop workflow, translated to the browser.</h2>
             <ul>
               <li>Responsive left-center-right editor with waveform, phrase list, and persistent status feedback.</li>
-              <li>Library actions for check out, sync, check in, force check in, and admin take over.</li>
-              <li>Admin-only storage settings aligned to server-managed S3-compatible providers.</li>
+              <li>Library actions for check out, save, check in, force check in, and admin take over.</li>
+              <li>Admin-only storage and sleep settings aligned to server-managed S3-compatible providers.</li>
             </ul>
           </div>
           <div className="spec-card ghost">
@@ -3007,14 +3138,6 @@ export default function App() {
                       </button>
                       <button
                         className="toolbar-button"
-                        onClick={() => void sync(selectedTitle.id)}
-                        type="button"
-                        disabled={!canSyncTitle(selectedTitle)}
-                      >
-                        Sync Checked Out
-                      </button>
-                      <button
-                        className="toolbar-button"
                         onClick={() => void checkIn(selectedTitle.id)}
                         type="button"
                         disabled={!canCheckInTitle(selectedTitle)}
@@ -3109,7 +3232,7 @@ export default function App() {
                 <li>One title can be checked out by only one user at a time.</li>
                 <li>One user can have only one active checked-out title at a time.</li>
                 <li>Logout ends the browser session only and does not release the checkout.</li>
-                <li>Sync persists the working draft without checking the title back in.</li>
+                <li>Save persists the working draft without checking the title back in.</li>
               </ul>
             </section>
           </div>
@@ -3120,7 +3243,7 @@ export default function App() {
           <div className="panel-header">
             <div>
               <span className="eyebrow">{currentUser.role === "admin" ? "Admin Settings" : "Account Settings"}</span>
-              <h2>{currentUser.role === "admin" ? "Accounts and Storage" : "Account"}</h2>
+              <h2>{currentUser.role === "admin" ? "Accounts, Storage, and Sleep" : "Account"}</h2>
             </div>
           </div>
 
@@ -3482,6 +3605,78 @@ export default function App() {
                     </article>
                   ) : null}
                 </div>
+              </section>
+            ) : null}
+
+            {currentUser.role === "admin" ? (
+              <section className="card form-card span-two">
+                <div className="card-header">
+                  <div>
+                    <span className="eyebrow">Sleep Control</span>
+                    <h3>Serverless Keep-Awake</h3>
+                  </div>
+                  <div className="button-row">
+                    <button className="toolbar-button primary" onClick={() => void saveKeepAwakeControl()} type="button">
+                      Save Sleep Control
+                    </button>
+                  </div>
+                </div>
+                <div className="settings-form">
+                  <label className="check-field">
+                    <input
+                      type="checkbox"
+                      checked={appState.runtime.adminKeepAwake}
+                      onChange={(event) =>
+                        updateState((current) => ({
+                          ...current,
+                          runtime: { ...current.runtime, adminKeepAwake: event.target.checked },
+                        }))
+                      }
+                    />
+                    <span>Manually keep the Railway service awake</span>
+                  </label>
+                  <label className="field">
+                    <span>Current reason</span>
+                    <input value={formatKeepAwakeReason(appState.runtime.reason, appState.runtime.activeJobCount)} readOnly />
+                  </label>
+                  <label className="field">
+                    <span>Active background jobs</span>
+                    <input value={String(appState.runtime.activeJobCount)} readOnly />
+                  </label>
+                  <label className="field">
+                    <span>Keep awake until</span>
+                    <input value={formatKeepAwakeWindow(appState.runtime)} readOnly />
+                  </label>
+                  <label className="field">
+                    <span>Heartbeat state</span>
+                    <input value={appState.runtime.keepAwakeActive ? "Self-ping active" : "Self-ping idle"} readOnly />
+                  </label>
+                  <label className="field">
+                    <span>Heartbeat target</span>
+                    <input value={appState.runtime.heartbeatUrl || "Unavailable"} readOnly />
+                  </label>
+                  <label className="field">
+                    <span>Last heartbeat</span>
+                    <input value={formatTimestamp(appState.runtime.lastHeartbeatAt)} readOnly />
+                  </label>
+                </div>
+                <div className="settings-note">
+                  While the manual override is off, the server self-pings only when a background import is active or the
+                  browser reports recent user activity. Once those stop, Railway can sleep the service roughly 10 minutes later.
+                </div>
+                <div className="settings-note">
+                  Activity pulse window: about {appState.runtime.activityWindowSeconds} seconds. Heartbeat cadence: every{" "}
+                  {appState.runtime.heartbeatIntervalSeconds} seconds.
+                </div>
+                {!appState.runtime.heartbeatAvailable ? (
+                  <div className="settings-note">
+                    Self-ping is unavailable until the server knows its public URL through `APP_BASE_URL` or Railway&apos;s
+                    public domain.
+                  </div>
+                ) : null}
+                {appState.runtime.lastHeartbeatError ? (
+                  <div className="settings-note">Last heartbeat issue: {appState.runtime.lastHeartbeatError}</div>
+                ) : null}
               </section>
             ) : null}
 

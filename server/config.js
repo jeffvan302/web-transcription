@@ -32,7 +32,7 @@ export const appConfig = {
   ytDlpPath: process.env.YT_DLP_PATH || "yt-dlp",
   ffmpegPath: process.env.FFMPEG_PATH || "ffmpeg",
   ffprobePath: process.env.FFPROBE_PATH || "ffprobe",
-  baseUrl: process.env.APP_BASE_URL || "",
+  baseUrl: normalizeEndpointUrl(process.env.APP_BASE_URL || process.env.RAILWAY_PUBLIC_DOMAIN || ""),
   environment: process.env.NODE_ENV || "development",
 };
 

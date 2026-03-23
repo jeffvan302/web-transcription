@@ -163,6 +163,12 @@ db.exec(`
     last_connection_test_at TEXT,
     audit_visible INTEGER NOT NULL DEFAULT 1
   );
+
+  CREATE TABLE IF NOT EXISTS keep_awake_settings (
+    id INTEGER PRIMARY KEY CHECK (id = 1),
+    admin_keep_awake INTEGER NOT NULL DEFAULT 0,
+    updated_at TEXT NOT NULL
+  );
 `);
 
 function ensureColumn(tableName, columnName, columnSql) {
@@ -427,6 +433,18 @@ function seedStorageIfNeeded() {
   });
 }
 
+function seedKeepAwakeSettingsIfNeeded() {
+  const existing = db.prepare("SELECT COUNT(*) AS count FROM keep_awake_settings").get();
+  if (existing.count > 0) {
+    return;
+  }
+
+  db.prepare(`
+    INSERT INTO keep_awake_settings (id, admin_keep_awake, updated_at)
+    VALUES (1, 0, ?)
+  `).run(nowIso());
+}
+
 function applyHostedStorageDefaultsIfNeeded() {
   if (defaultStorageSettings.provider === "Local Disk") {
     return;
@@ -479,6 +497,7 @@ seedWorkspacesIfNeeded();
 migrateUsersForIdentityAndWorkspace();
 migrateWorkspaceAssignments();
 seedStorageIfNeeded();
+seedKeepAwakeSettingsIfNeeded();
 applyHostedStorageDefaultsIfNeeded();
 
 export function sanitizeUser(row) {
@@ -957,6 +976,32 @@ export function markStorageConnectionTest() {
   return timestamp;
 }
 
+export function getKeepAwakeSettings() {
+  const row = db.prepare("SELECT * FROM keep_awake_settings WHERE id = 1").get();
+  if (!row) {
+    return {
+      adminKeepAwake: false,
+      updatedAt: null,
+    };
+  }
+
+  return {
+    adminKeepAwake: Boolean(row.admin_keep_awake),
+    updatedAt: row.updated_at || null,
+  };
+}
+
+export function saveKeepAwakeSettings(input) {
+  const timestamp = nowIso();
+  db.prepare(`
+    UPDATE keep_awake_settings
+    SET admin_keep_awake = ?, updated_at = ?
+    WHERE id = 1
+  `).run(input.adminKeepAwake ? 1 : 0, timestamp);
+
+  return getKeepAwakeSettings();
+}
+
 function resolveWorkspaceRowForState(userId, preferredWorkspaceId = null) {
   const preferredWorkspace = preferredWorkspaceId ? getWorkspaceRow(preferredWorkspaceId) : null;
   if (preferredWorkspace?.status === "active") {
@@ -1387,6 +1432,11 @@ export function claimNextQueuedJob() {
   }
 
   return getJob(row.id);
+}
+
+export function countActiveJobs() {
+  const row = db.prepare("SELECT COUNT(*) AS count FROM jobs WHERE status IN ('queued', 'running')").get();
+  return Number(row?.count || 0);
 }
 
 export function recoverInterruptedJobs() {
