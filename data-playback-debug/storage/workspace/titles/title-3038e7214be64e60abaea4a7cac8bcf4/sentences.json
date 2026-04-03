@@ -1,0 +1,63 @@
+{
+  "titleId": "title-3038e7214be64e60abaea4a7cac8bcf4",
+  "workspaceId": "workspace-c8132e2cd6bb4a0db1a03f854ee010ea",
+  "videoId": "smoke-test-audio-mn1fdpky",
+  "title": "Smoke Test Audio",
+  "source": "Local Smoke Test",
+  "language": "en",
+  "duration": 2,
+  "sourceType": "local",
+  "uploadedAt": "2026-03-22T07:18:23.941Z",
+  "updatedAt": "2026-04-03T09:51:21.906Z",
+  "checkedOutByUserId": "user-25a717292a134406ac0edd34eaa3fa3f",
+  "checkedOutAt": "2026-04-03T09:51:21.905Z",
+  "badge": null,
+  "phraseCount": 2,
+  "phrases": [
+    {
+      "id": "phrase-debug-a",
+      "start": 0.2,
+      "end": 0.9,
+      "text": "Checkout phrase one",
+      "enabled": true,
+      "reviewed": false
+    },
+    {
+      "id": "phrase-debug-b",
+      "start": 1,
+      "end": 1.6,
+      "text": "Checkout phrase two",
+      "enabled": true,
+      "reviewed": false
+    }
+  ],
+  "savedSnapshot": [
+    {
+      "id": "phrase-debug-a",
+      "start": 0.2,
+      "end": 0.9,
+      "text": "Checkout phrase one",
+      "enabled": true,
+      "reviewed": false
+    },
+    {
+      "id": "phrase-debug-b",
+      "start": 1,
+      "end": 1.6,
+      "text": "Checkout phrase two",
+      "enabled": true,
+      "reviewed": false
+    }
+  ],
+  "draft": {
+    "id": "draft-ed4763924e0147b4b25cae266b9dc0a5",
+    "userId": "user-25a717292a134406ac0edd34eaa3fa3f",
+    "version": 1,
+    "status": "active",
+    "isDirty": false,
+    "lastAutosaveAt": null,
+    "lastSaveAt": "2026-04-03T09:51:21.905Z",
+    "lastSyncAt": null,
+    "updatedAt": "2026-04-03T09:51:21.906Z"
+  }
+}

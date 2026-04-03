@@ -228,7 +228,22 @@ function centerWavePan(duration: number, viewRange: number, focusTime: number) {
   return clamp(focusTime - viewRange / 2, 0, Math.max(0, duration - viewRange));
 }
 
-function waitForAudioMetadata(audio: HTMLAudioElement) {
+function describeAudioError(audio: HTMLAudioElement, fallback: string) {
+  switch (audio.error?.code) {
+    case MediaError.MEDIA_ERR_ABORTED:
+      return "Audio loading was interrupted before playback could begin.";
+    case MediaError.MEDIA_ERR_NETWORK:
+      return "Audio loading failed because the browser could not keep the media stream open.";
+    case MediaError.MEDIA_ERR_DECODE:
+      return "Audio playback failed because the browser could not decode the working audio.";
+    case MediaError.MEDIA_ERR_SRC_NOT_SUPPORTED:
+      return "Audio playback failed because the working audio source was not accepted by the browser.";
+    default:
+      return fallback;
+  }
+}
+
+function waitForAudioMetadata(audio: HTMLAudioElement, timeoutMs = 12000) {
   if (audio.readyState >= 1) {
     return Promise.resolve();
   }
@@ -249,20 +264,20 @@ function waitForAudioMetadata(audio: HTMLAudioElement) {
 
     const handleError = () => {
       cleanup();
-      reject(new Error("Audio metadata could not be loaded."));
+      reject(new Error(describeAudioError(audio, "Audio metadata could not be loaded.")));
     };
 
     timeoutId = window.setTimeout(() => {
       cleanup();
       reject(new Error("Audio metadata timed out while loading."));
-    }, 5000);
+    }, timeoutMs);
 
     audio.addEventListener("loadedmetadata", handleLoadedMetadata);
     audio.addEventListener("error", handleError);
   });
 }
 
-function waitForAudioCanPlay(audio: HTMLAudioElement) {
+function waitForAudioCanPlay(audio: HTMLAudioElement, timeoutMs = 15000) {
   if (audio.readyState >= 3 && !audio.seeking) {
     return Promise.resolve();
   }
@@ -283,13 +298,13 @@ function waitForAudioCanPlay(audio: HTMLAudioElement) {
 
     const handleError = () => {
       cleanup();
-      reject(new Error("Audio data could not be buffered for playback."));
+      reject(new Error(describeAudioError(audio, "Audio data could not be buffered for playback.")));
     };
 
     timeoutId = window.setTimeout(() => {
       cleanup();
       reject(new Error("Audio seek timed out before playback could begin."));
-    }, 12000);
+    }, timeoutMs);
 
     audio.addEventListener("canplay", handleCanPlay);
     audio.addEventListener("error", handleError);
@@ -403,6 +418,9 @@ export default function App() {
   const textareaRef = useRef<HTMLTextAreaElement | null>(null);
   const waveformRef = useRef<SVGSVGElement | null>(null);
   const audioRef = useRef<HTMLAudioElement | null>(null);
+  const audioBlobUrlRef = useRef<string | null>(null);
+  const audioSourceModeRef = useRef<"direct" | "blob" | null>(null);
+  const audioSourceTitleIdRef = useRef<string | null>(null);
   const topMenuRef = useRef<HTMLDivElement | null>(null);
   const asrImportInputRef = useRef<HTMLInputElement | null>(null);
   const seenTerminalJobsRef = useRef<Set<string>>(new Set());
@@ -723,6 +741,7 @@ export default function App() {
   useEffect(() => {
     const audio = new Audio();
     audio.preload = "auto";
+    audio.crossOrigin = "use-credentials";
     audioRef.current = audio;
 
     const handlePause = () => {
@@ -744,6 +763,7 @@ export default function App() {
 
     return () => {
       pauseAudio(audio, "stop");
+      clearAudioSourceTracking();
       audio.removeEventListener("pause", handlePause);
       audio.removeEventListener("ended", handleEnded);
       audioRef.current = null;
@@ -770,7 +790,7 @@ export default function App() {
       const syncToSelectedPhraseStart = async () => {
         const nextStart = selectedPhraseRef.current?.start ?? 0;
         try {
-          await waitForAudioMetadata(audio);
+          await ensureAudioReady(audio, selectedTitle);
           const actualTime = await seekAudio(audio, nextStart);
           setPlayheadTime(actualTime);
         } catch {
@@ -782,16 +802,17 @@ export default function App() {
         void syncToSelectedPhraseStart();
       };
 
-      audio.src = selectedTitle.audioUrl;
+      primeDirectAudioSource(audio, selectedTitle);
       audio.addEventListener("loadedmetadata", handleLoadedMetadata, { once: true });
-      audio.load();
       void syncToSelectedPhraseStart();
       setPlaybackState("stopped");
       return () => {
         audio.removeEventListener("loadedmetadata", handleLoadedMetadata);
       };
     } else {
+      clearAudioSourceTracking();
       audio.removeAttribute("src");
+      audio.load();
       setPlayheadTime(null);
     }
     setPlaybackState("stopped");
@@ -1097,7 +1118,81 @@ export default function App() {
     setLoadingState(false);
   }
 
+  function releaseAudioBlobUrl() {
+    if (audioBlobUrlRef.current) {
+      URL.revokeObjectURL(audioBlobUrlRef.current);
+      audioBlobUrlRef.current = null;
+    }
+  }
+
+  function clearAudioSourceTracking() {
+    releaseAudioBlobUrl();
+    audioSourceModeRef.current = null;
+    audioSourceTitleIdRef.current = null;
+  }
+
+  function primeDirectAudioSource(audio: HTMLAudioElement, title: TitleRecord) {
+    clearAudioSourceTracking();
+    audio.src = title.audioUrl || "";
+    audioSourceModeRef.current = title.audioUrl ? "direct" : null;
+    audioSourceTitleIdRef.current = title.audioUrl ? title.id : null;
+    audio.load();
+  }
+
+  async function swapToAuthenticatedAudioBlob(audio: HTMLAudioElement, title: TitleRecord) {
+    if (!title.audioUrl) {
+      throw new Error("This title does not have playable working audio yet.");
+    }
+
+    const response = await fetch(title.audioUrl, { credentials: "include" });
+    if (!response.ok) {
+      throw new Error(`Authenticated audio download failed with ${response.status}.`);
+    }
+
+    const blob = await response.blob();
+    releaseAudioBlobUrl();
+    const objectUrl = URL.createObjectURL(blob);
+    audioBlobUrlRef.current = objectUrl;
+    audio.src = objectUrl;
+    audioSourceModeRef.current = "blob";
+    audioSourceTitleIdRef.current = title.id;
+    audio.load();
+  }
+
+  async function ensureAudioReady(audio: HTMLAudioElement, title: TitleRecord, requireCanPlay = false) {
+    const needsDirectSource = audioSourceTitleIdRef.current !== title.id || audioSourceModeRef.current === null;
+    if (needsDirectSource) {
+      primeDirectAudioSource(audio, title);
+    }
+
+    try {
+      await waitForAudioMetadata(audio);
+      if (requireCanPlay) {
+        await waitForAudioCanPlay(audio);
+      }
+      return;
+    } catch (error) {
+      if (audioSourceModeRef.current === "blob") {
+        throw error;
+      }
+    }
+
+    await swapToAuthenticatedAudioBlob(audio, title);
+    await waitForAudioMetadata(audio, 20000);
+    if (requireCanPlay) {
+      await waitForAudioCanPlay(audio, 20000);
+    }
+    postStatus("info", "Playback retried with an authenticated audio download for this checked-out title.");
+  }
+
   function resetToLoggedOutState(message: string) {
+    const audio = audioRef.current;
+    if (audio) {
+      pauseAudio(audio, "stop");
+      audio.removeAttribute("src");
+      audio.load();
+    }
+    clearAudioSourceTracking();
     appStateRef.current = EMPTY_STATE;
     setAppState(EMPTY_STATE);
     setJobs([]);
@@ -1474,9 +1569,8 @@ export default function App() {
 
     if (action === "playing") {
       try {
-        await waitForAudioMetadata(audio);
+        await ensureAudioReady(audio, selectedTitle, true);
         const actualStart = await seekAudio(audio, selectedPhrase.start);
-        await waitForAudioCanPlay(audio);
         audio.playbackRate = playbackSpeed;
         playbackCommandRef.current = null;
         setPlayheadTime(actualStart);

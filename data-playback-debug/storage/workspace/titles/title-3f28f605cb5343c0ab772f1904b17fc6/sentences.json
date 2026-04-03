@@ -1,0 +1,29 @@
+{
+  "titleId": "title-3f28f605cb5343c0ab772f1904b17fc6",
+  "workspaceId": "workspace-c8132e2cd6bb4a0db1a03f854ee010ea",
+  "videoId": "smoke-test-audio-mn077jf4",
+  "title": "Smoke Test Audio",
+  "source": "Local Smoke Test",
+  "language": "en",
+  "duration": 2,
+  "sourceType": "local",
+  "uploadedAt": "2026-03-21T10:41:52.915Z",
+  "updatedAt": "2026-04-03T09:34:02.922Z",
+  "checkedOutByUserId": "user-25a717292a134406ac0edd34eaa3fa3f",
+  "checkedOutAt": "2026-04-03T09:34:02.922Z",
+  "badge": null,
+  "phraseCount": 0,
+  "phrases": [],
+  "savedSnapshot": [],
+  "draft": {
+    "id": "draft-0c3a52badcf241ba9b1318763b0a28a5",
+    "userId": "user-25a717292a134406ac0edd34eaa3fa3f",
+    "version": 1,
+    "status": "active",
+    "isDirty": false,
+    "lastAutosaveAt": null,
+    "lastSaveAt": "2026-04-03T09:34:02.922Z",
+    "lastSyncAt": null,
+    "updatedAt": "2026-04-03T09:34:02.923Z"
+  }
+}
