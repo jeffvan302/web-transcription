@@ -448,6 +448,7 @@ export default function App() {
   const editable = Boolean(currentUser && selectedTitle?.checkedOutByUserId === currentUser.id);
   const canEdit = editable && !saveInFlight && !passwordChangeRequired;
   const activeCheckedOutTitleId = appState.titles.find((title) => title.checkedOutByUserId === currentUser?.id)?.id ?? null;
+  const activeCheckedOutTitle = appState.titles.find((title) => title.id === activeCheckedOutTitleId) ?? null;
   const hasActiveJobs = jobs.some((job) => job.status === "queued" || job.status === "running");
   const activeWaveformRebuildJob =
     selectedTitle
@@ -1489,6 +1490,9 @@ export default function App() {
     if (view === "editor") {
       postStatus("info", "Editor ready.");
     }
+    if (view === "import") {
+      postStatus("info", "Import and export tools ready.");
+    }
   }
 
   async function login() {
@@ -2045,7 +2049,7 @@ export default function App() {
     await saveTitle("manual", currentTitle.id, "Combined the selected adjacent phrases.");
   }
 
-  async function checkout(titleId: string) {
+  async function checkout(titleId: string, options: { openEditor?: boolean } = {}) {
     if (!currentUser) {
       return;
     }
@@ -2057,10 +2061,14 @@ export default function App() {
         ...response,
         state: {
           ...response.state,
+          currentView: options.openEditor ? "editor" : response.state.currentView,
           selectedTitleId: titleId,
           selectedPhraseIds: title?.phrases[0] ? [title.phrases[0].id] : [],
         },
       }, { preserveView: true });
+      if (options.openEditor) {
+        updateState((current) => ({ ...current, currentView: "editor" }));
+      }
       postStatus("success", `${title?.title ?? "Title"} is now checked out to you.`);
     } catch (error) {
       postStatus("error", error instanceof Error ? error.message : "Checkout failed.");
@@ -2144,21 +2152,11 @@ export default function App() {
     try {
       const response = await api.queueYouTubeImport(urls, appState.importLanguage);
       setJobs((current) => [...response.jobs, ...current].slice(0, 30));
-      updateState((current) => ({ ...current, currentView: "shared", youtubeUrl: "" }));
+      updateState((current) => ({ ...current, currentView: "import", youtubeUrl: "" }));
       postStatus("info", `${response.jobs.length} YouTube import${response.jobs.length === 1 ? "" : "s"} queued on the server.`);
     } catch (error) {
       postStatus("error", error instanceof Error ? error.message : "Could not queue the YouTube import.");
     }
-  }
-
-  function createImportedTitle(sourceType: TitleRecord["sourceType"]) {
-    if (sourceType === "package") {
-      asrImportInputRef.current?.click();
-      return;
-    }
-
-    updateState((current) => ({ ...current, currentView: "shared" }));
-    postStatus("info", "Choose a media file and optional subtitle file in the upload form.");
   }
 
   async function submitMediaImport() {
@@ -2213,7 +2211,7 @@ export default function App() {
     try {
       const response = await api.queueAsrImport(formData);
       setJobs((current) => [response.job, ...current].slice(0, 30));
-      updateState((current) => ({ ...current, currentView: "shared" }));
+      updateState((current) => ({ ...current, currentView: "import" }));
       postStatus("info", ".asr archive queued for import on the server.");
     } catch (error) {
       postStatus("error", error instanceof Error ? error.message : ".asr import failed to queue.");
@@ -2528,14 +2526,6 @@ export default function App() {
         <div className="toolbar-grid topbar-actions">
           <div className="view-switch">
             <button
-              className={`toolbar-button ${appState.currentView === "editor" ? "selected-view" : ""}`}
-              onClick={() => switchView("editor")}
-              type="button"
-              disabled={passwordChangeRequired}
-            >
-              Editor
-            </button>
-            <button
               className={`toolbar-button ${appState.currentView === "shared" ? "selected-view" : ""}`}
               onClick={() => switchView("shared")}
               type="button"
@@ -2543,18 +2533,34 @@ export default function App() {
             >
               Library
             </button>
+            <button
+              className={`toolbar-button ${appState.currentView === "editor" ? "selected-view" : ""}`}
+              onClick={() => switchView("editor")}
+              type="button"
+              disabled={passwordChangeRequired}
+            >
+              Editor
+            </button>
           </div>
-          <button className="toolbar-button" onClick={reloadLibrary} type="button">
-            Reload
-          </button>
-          <button
-            className="toolbar-button primary"
-            onClick={() => selectedTitle && void saveTitle("manual", selectedTitle.id)}
-            type="button"
-            disabled={!selectedTitle || !editable || saveInFlight}
-          >
-            Save
-          </button>
+          {appState.currentView !== "editor" ? (
+            <button className="toolbar-button" onClick={reloadLibrary} type="button">
+              Refresh
+            </button>
+          ) : null}
+          {appState.currentView === "editor" ? (
+            <button
+              className="toolbar-button primary"
+              onClick={() => selectedTitle && void saveTitle("manual", selectedTitle.id)}
+              type="button"
+              disabled={!selectedTitle || !editable || saveInFlight}
+            >
+              Save
+            </button>
+          ) : activeCheckedOutTitle ? (
+            <button className="toolbar-button primary" onClick={() => void selectTitle(activeCheckedOutTitle.id)} type="button">
+              Open Editor
+            </button>
+          ) : null}
         </div>
 
         <div ref={topMenuRef} className="topbar-menu-shell">
@@ -2580,6 +2586,14 @@ export default function App() {
               >
                 {currentUser.role === "admin" ? "Account / Admin" : "Account"}
               </button>
+              <button
+                className={`toolbar-button ${appState.currentView === "import" ? "selected-view" : ""}`}
+                onClick={() => switchView("import")}
+                type="button"
+                disabled={passwordChangeRequired}
+              >
+                Import / Export
+              </button>
               <label className="field compact">
                 <span>Workspace</span>
                 <select
@@ -2594,82 +2608,6 @@ export default function App() {
                   ))}
                 </select>
               </label>
-              <label className="field compact">
-                <span>Language</span>
-                <input
-                  list="import-language-suggestions"
-                  value={appState.importLanguage}
-                  onChange={(event) => updateState((current) => ({ ...current, importLanguage: event.target.value }))}
-                  placeholder="en"
-                />
-                <datalist id="import-language-suggestions">
-                  {languageSuggestions.map((language) => (
-                    <option key={language} value={language} />
-                  ))}
-                </datalist>
-              </label>
-              <div className="topbar-menu-group">
-                <button className="toolbar-button primary" onClick={() => switchView("shared")} type="button" disabled={passwordChangeRequired}>
-                  Library
-                </button>
-                <button
-                  className="toolbar-button"
-                  onClick={() => {
-                    setTopMenuOpen(false);
-                    createImportedTitle("local");
-                  }}
-                  type="button"
-                  disabled={passwordChangeRequired}
-                >
-                  Import Media
-                </button>
-              </div>
-              <div className="topbar-menu-group">
-                <button
-                  className="toolbar-button"
-                  onClick={() => {
-                    setTopMenuOpen(false);
-                    handleExport("current");
-                  }}
-                  type="button"
-                  disabled={!selectedTitle || passwordChangeRequired}
-                >
-                  Export Current
-                </button>
-                <button
-                  className="toolbar-button"
-                  onClick={() => {
-                    setTopMenuOpen(false);
-                    handleExport("all");
-                  }}
-                  type="button"
-                  disabled={passwordChangeRequired}
-                >
-                  Export All
-                </button>
-                <button
-                  className="toolbar-button"
-                  onClick={() => {
-                    setTopMenuOpen(false);
-                    handleExport("pack");
-                  }}
-                  type="button"
-                  disabled={passwordChangeRequired}
-                >
-                  Pack .asr
-                </button>
-                <button
-                  className="toolbar-button"
-                  onClick={() => {
-                    setTopMenuOpen(false);
-                    handleExport("import");
-                  }}
-                  type="button"
-                  disabled={passwordChangeRequired}
-                >
-                  Import .asr
-                </button>
-              </div>
               <button
                 className="toolbar-button"
                 onClick={() => {
@@ -3107,131 +3045,17 @@ export default function App() {
               <button className="toolbar-button" onClick={reloadLibrary} type="button">
                 Refresh
               </button>
-              <button className="toolbar-button primary" onClick={() => createImportedTitle("local")} type="button">
-                Upload New Title
-              </button>
+              {activeCheckedOutTitle ? (
+                <button className="toolbar-button primary" onClick={() => void selectTitle(activeCheckedOutTitle.id)} type="button">
+                  Open Checked-Out Title
+                </button>
+              ) : (
+                <button className="toolbar-button" onClick={() => switchView("import")} type="button">
+                  Import / Export
+                </button>
+              )}
             </div>
           </div>
-
-          <section className="card form-card">
-            <div className="card-header">
-              <div>
-                <span className="eyebrow">Import YouTube</span>
-                <h3>Queue One or More URLs</h3>
-              </div>
-              <div className="button-row">
-                <button className="toolbar-button" onClick={() => void probeLanguages()} type="button">
-                  Probe First URL
-                </button>
-                <button className="toolbar-button primary" onClick={() => void submitYouTubeImport()} type="button">
-                  Queue Import
-                </button>
-              </div>
-            </div>
-            <div className="settings-form single-column">
-              <label className="field">
-                <span>YouTube URLs</span>
-                <textarea
-                  className="caption-editor import-textarea"
-                  value={appState.youtubeUrl}
-                  onChange={(event) => updateState((current) => ({ ...current, youtubeUrl: event.target.value }))}
-                  placeholder="Paste one or more YouTube URLs, separated by new lines, commas, or spaces."
-                />
-              </label>
-              <div className="helper-text">Queued URLs: {parseYouTubeEntries(appState.youtubeUrl).length}</div>
-              {probedImportLanguages.length > 0 ? (
-                <div className="helper-text">
-                  Probed subtitle languages loaded: {probedImportLanguages.length}. Pick one from Language or type a custom code.
-                </div>
-              ) : null}
-            </div>
-          </section>
-
-          <section className="card form-card">
-            <div className="card-header">
-              <div>
-                <span className="eyebrow">Import Media</span>
-                <h3>Upload Local Media or Subtitle Pair</h3>
-              </div>
-              <button className="toolbar-button primary" onClick={() => void submitMediaImport()} type="button">
-                Queue Upload
-              </button>
-            </div>
-            <div className="settings-form">
-              <label className="field">
-                <span>Title</span>
-                <input value={mediaTitle} onChange={(event) => setMediaTitle(event.target.value)} placeholder="Imported Media Title" />
-              </label>
-              <label className="field">
-                <span>Source / Channel</span>
-                <input value={mediaSource} onChange={(event) => setMediaSource(event.target.value)} placeholder="Uploaded Media" />
-              </label>
-              <label className="field">
-                <span>Language</span>
-                <input
-                  list="media-language-suggestions"
-                  value={mediaLanguage}
-                  onChange={(event) => setMediaLanguage(event.target.value)}
-                  placeholder="en"
-                />
-                <datalist id="media-language-suggestions">
-                  {languageSuggestions.map((language) => (
-                    <option key={language} value={language} />
-                  ))}
-                </datalist>
-              </label>
-              <label className="field">
-                <span>Media File</span>
-                <input
-                  type="file"
-                  accept="audio/*,video/*"
-                  onChange={(event) => {
-                    setMediaFile(event.target.files?.[0] ?? null);
-                    setMediaProbeToken("");
-                    setMediaSubtitleStreams([]);
-                    setSelectedSubtitleStreamIndex("");
-                  }}
-                />
-              </label>
-              <label className="field">
-                <span>Embedded Subtitle Track</span>
-                <select
-                  value={selectedSubtitleStreamIndex}
-                  disabled={mediaProbeInFlight || mediaSubtitleStreams.length === 0 || Boolean(subtitleFile)}
-                  onChange={(event) => setSelectedSubtitleStreamIndex(event.target.value)}
-                >
-                  <option value="">No embedded subtitle track</option>
-                  {mediaSubtitleStreams.map((stream) => (
-                    <option key={stream.index} value={String(stream.index)}>
-                      {stream.language} / {stream.title} / {stream.codecName}
-                    </option>
-                  ))}
-                </select>
-              </label>
-              <label className="field">
-                <span>Subtitle File (optional)</span>
-                <input
-                  type="file"
-                  accept=".srt,.vtt,.json,.json3,.srv3"
-                  onChange={(event) => {
-                    setSubtitleFile(event.target.files?.[0] ?? null);
-                    if (event.target.files?.[0]) {
-                      setSelectedSubtitleStreamIndex("");
-                    }
-                  }}
-                />
-              </label>
-            </div>
-            <div className="helper-text">
-              {mediaProbeInFlight
-                ? "Inspecting the uploaded media for embedded subtitle tracks..."
-                : mediaSubtitleStreams.length > 0
-                  ? `${mediaSubtitleStreams.length} embedded subtitle track${mediaSubtitleStreams.length === 1 ? "" : "s"} found.`
-                  : mediaFile
-                    ? "No embedded subtitle tracks were detected, or the probe has not completed yet."
-                    : "Choose a media file to detect embedded subtitle tracks automatically."}
-            </div>
-          </section>
 
           <section className="card form-card">
             <div className="card-header">
@@ -3338,14 +3162,20 @@ export default function App() {
                         : "This title is currently checked in and available."}
                     </div>
                     <div className="action-cluster">
-                      <button
-                        className="toolbar-button"
-                        onClick={() => void checkout(selectedTitle.id)}
-                        type="button"
-                        disabled={!canCheckoutTitle(selectedTitle)}
-                      >
-                        {selectedTitle.checkedOutByUserId === currentUser?.id ? "Checked Out" : "Check Out"}
-                      </button>
+                      {selectedTitle.checkedOutByUserId === currentUser?.id ? (
+                        <button className="toolbar-button primary" onClick={() => void selectTitle(selectedTitle.id)} type="button">
+                          Open Editor
+                        </button>
+                      ) : (
+                        <button
+                          className="toolbar-button primary"
+                          onClick={() => void checkout(selectedTitle.id, { openEditor: true })}
+                          type="button"
+                          disabled={!canCheckoutTitle(selectedTitle)}
+                        >
+                          Check Out & Open
+                        </button>
+                      )}
                       <button
                         className="toolbar-button"
                         onClick={() => void checkIn(selectedTitle.id)}
@@ -3378,7 +3208,11 @@ export default function App() {
                         </>
                       ) : null}
                     </div>
-                    <div className="helper-text">{getTitleHeaderSuffix(selectedTitle)}</div>
+                    <div className="helper-text">
+                      {selectedTitle.checkedOutByUserId === currentUser?.id
+                        ? "Open Editor to continue sentence review and then save or check in when you are done."
+                        : getTitleHeaderSuffix(selectedTitle)}
+                    </div>
                   </article>
                 ) : null}
               </div>
@@ -3386,28 +3220,6 @@ export default function App() {
           </section>
 
           <div className="audit-grid">
-            <section className="card">
-              <div className="card-header">
-                <div>
-                  <span className="eyebrow">Background Jobs</span>
-                  <h3>Import Queue</h3>
-                </div>
-              </div>
-              <div className="audit-list">
-                {jobs.length === 0 ? <p className="helper-text">No queued or recent jobs yet.</p> : null}
-                {jobs.map((job) => (
-                  <article className="audit-item" key={job.id}>
-                    <div className="audit-top">
-                      <strong>{job.type.replaceAll("_", " ")}</strong>
-                      <span>{job.progress}%</span>
-                    </div>
-                    <span>{job.status}</span>
-                    <p>{job.error || job.message || "Waiting for server worker."}</p>
-                  </article>
-                ))}
-              </div>
-            </section>
-
             <section className="card">
               <div className="card-header">
                 <div>
@@ -3444,6 +3256,216 @@ export default function App() {
                 <li>Logout ends the browser session only and does not release the checkout.</li>
                 <li>Save persists the working draft without checking the title back in.</li>
               </ul>
+            </section>
+          </div>
+        </section>
+      ) : null}
+      {appState.currentView === "import" ? (
+        <section className="view-panel">
+          <div className="panel-header">
+            <div>
+              <span className="eyebrow">Import / Export</span>
+              <h2>Bring Titles In</h2>
+            </div>
+            <div className="button-row">
+              <button className="toolbar-button" onClick={() => switchView("shared")} type="button">
+                Back to Library
+              </button>
+              {activeCheckedOutTitle ? (
+                <button className="toolbar-button primary" onClick={() => void selectTitle(activeCheckedOutTitle.id)} type="button">
+                  Open Checked-Out Title
+                </button>
+              ) : null}
+            </div>
+          </div>
+
+          <div className="settings-grid">
+            <section className="card form-card">
+              <div className="card-header">
+                <div>
+                  <span className="eyebrow">Import YouTube</span>
+                  <h3>Queue One or More URLs</h3>
+                </div>
+                <div className="button-row">
+                  <button className="toolbar-button" onClick={() => void probeLanguages()} type="button">
+                    Probe First URL
+                  </button>
+                  <button className="toolbar-button primary" onClick={() => void submitYouTubeImport()} type="button">
+                    Queue Import
+                  </button>
+                </div>
+              </div>
+              <div className="settings-form single-column">
+                <label className="field">
+                  <span>YouTube URLs</span>
+                  <textarea
+                    className="caption-editor import-textarea"
+                    value={appState.youtubeUrl}
+                    onChange={(event) => updateState((current) => ({ ...current, youtubeUrl: event.target.value }))}
+                    placeholder="Paste one or more YouTube URLs, separated by new lines, commas, or spaces."
+                  />
+                </label>
+                <label className="field">
+                  <span>Subtitle / Import language</span>
+                  <input
+                    list="import-language-suggestions"
+                    value={appState.importLanguage}
+                    onChange={(event) => updateState((current) => ({ ...current, importLanguage: event.target.value }))}
+                    placeholder="en"
+                  />
+                  <datalist id="import-language-suggestions">
+                    {languageSuggestions.map((language) => (
+                      <option key={language} value={language} />
+                    ))}
+                  </datalist>
+                </label>
+                <div className="helper-text">Queued URLs: {parseYouTubeEntries(appState.youtubeUrl).length}</div>
+                {probedImportLanguages.length > 0 ? (
+                  <div className="helper-text">
+                    Probed subtitle languages loaded: {probedImportLanguages.length}. Pick one from Language or type a custom code.
+                  </div>
+                ) : null}
+              </div>
+            </section>
+
+            <section className="card form-card">
+              <div className="card-header">
+                <div>
+                  <span className="eyebrow">Import Media</span>
+                  <h3>Upload Local Media or Subtitle Pair</h3>
+                </div>
+                <button className="toolbar-button primary" onClick={() => void submitMediaImport()} type="button">
+                  Queue Upload
+                </button>
+              </div>
+              <div className="settings-form">
+                <label className="field">
+                  <span>Title</span>
+                  <input value={mediaTitle} onChange={(event) => setMediaTitle(event.target.value)} placeholder="Imported Media Title" />
+                </label>
+                <label className="field">
+                  <span>Source / Channel</span>
+                  <input value={mediaSource} onChange={(event) => setMediaSource(event.target.value)} placeholder="Uploaded Media" />
+                </label>
+                <label className="field">
+                  <span>Language</span>
+                  <input
+                    list="media-language-suggestions"
+                    value={mediaLanguage}
+                    onChange={(event) => setMediaLanguage(event.target.value)}
+                    placeholder="en"
+                  />
+                  <datalist id="media-language-suggestions">
+                    {languageSuggestions.map((language) => (
+                      <option key={language} value={language} />
+                    ))}
+                  </datalist>
+                </label>
+                <label className="field">
+                  <span>Media File</span>
+                  <input
+                    type="file"
+                    accept="audio/*,video/*"
+                    onChange={(event) => {
+                      setMediaFile(event.target.files?.[0] ?? null);
+                      setMediaProbeToken("");
+                      setMediaSubtitleStreams([]);
+                      setSelectedSubtitleStreamIndex("");
+                    }}
+                  />
+                </label>
+                <label className="field">
+                  <span>Embedded Subtitle Track</span>
+                  <select
+                    value={selectedSubtitleStreamIndex}
+                    disabled={mediaProbeInFlight || mediaSubtitleStreams.length === 0 || Boolean(subtitleFile)}
+                    onChange={(event) => setSelectedSubtitleStreamIndex(event.target.value)}
+                  >
+                    <option value="">No embedded subtitle track</option>
+                    {mediaSubtitleStreams.map((stream) => (
+                      <option key={stream.index} value={String(stream.index)}>
+                        {stream.language} / {stream.title} / {stream.codecName}
+                      </option>
+                    ))}
+                  </select>
+                </label>
+                <label className="field">
+                  <span>Subtitle File (optional)</span>
+                  <input
+                    type="file"
+                    accept=".srt,.vtt,.json,.json3,.srv3"
+                    onChange={(event) => {
+                      setSubtitleFile(event.target.files?.[0] ?? null);
+                      if (event.target.files?.[0]) {
+                        setSelectedSubtitleStreamIndex("");
+                      }
+                    }}
+                  />
+                </label>
+              </div>
+              <div className="helper-text">
+                {mediaProbeInFlight
+                  ? "Inspecting the uploaded media for embedded subtitle tracks..."
+                  : mediaSubtitleStreams.length > 0
+                    ? `${mediaSubtitleStreams.length} embedded subtitle track${mediaSubtitleStreams.length === 1 ? "" : "s"} found.`
+                    : mediaFile
+                      ? "No embedded subtitle tracks were detected, or the probe has not completed yet."
+                      : "Choose a media file to detect embedded subtitle tracks automatically."}
+              </div>
+            </section>
+
+            <section className="card form-card">
+              <div className="card-header">
+                <div>
+                  <span className="eyebrow">Package Tools</span>
+                  <h3>Import and Export Files</h3>
+                </div>
+              </div>
+              <div className="button-row stack">
+                <button
+                  className="toolbar-button"
+                  onClick={() => handleExport("current")}
+                  type="button"
+                  disabled={!selectedTitle || passwordChangeRequired}
+                >
+                  Export Current
+                </button>
+                <button className="toolbar-button" onClick={() => handleExport("all")} type="button" disabled={passwordChangeRequired}>
+                  Export All
+                </button>
+                <button className="toolbar-button" onClick={() => handleExport("pack")} type="button" disabled={passwordChangeRequired}>
+                  Pack .asr
+                </button>
+                <button className="toolbar-button primary" onClick={() => handleExport("import")} type="button" disabled={passwordChangeRequired}>
+                  Import .asr
+                </button>
+              </div>
+              <div className="settings-note">
+                Import and export tools are separated from Library so the day-to-day review workflow stays cleaner on mobile.
+              </div>
+            </section>
+
+            <section className="card">
+              <div className="card-header">
+                <div>
+                  <span className="eyebrow">Background Jobs</span>
+                  <h3>Import Queue</h3>
+                </div>
+                <span className="pill">{jobs.length} items</span>
+              </div>
+              <div className="audit-list">
+                {jobs.length === 0 ? <p className="helper-text">No queued or recent jobs yet.</p> : null}
+                {jobs.map((job) => (
+                  <article className="audit-item" key={job.id}>
+                    <div className="audit-top">
+                      <strong>{job.type.replaceAll("_", " ")}</strong>
+                      <span>{job.progress}%</span>
+                    </div>
+                    <span>{job.status}</span>
+                    <p>{job.error || job.message || "Waiting for server worker."}</p>
+                  </article>
+                ))}
+              </div>
             </section>
           </div>
         </section>

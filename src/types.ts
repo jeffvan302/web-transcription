@@ -1,7 +1,7 @@
 export type Role = "user" | "admin";
 export type UserStatus = "active" | "disabled";
 export type StatusTone = "info" | "success" | "warning" | "error";
-export type View = "editor" | "shared" | "settings";
+export type View = "editor" | "shared" | "import" | "settings";
 export type SourceType = "youtube" | "local" | "package";
 export type StorageProvider = "Local Disk" | "Backblaze B2" | "Amazon S3" | "Cloudflare R2" | "MinIO";
 export type SaveKind = "manual" | "autosave" | "sync" | "checkin";
