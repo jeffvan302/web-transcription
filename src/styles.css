@@ -870,6 +870,65 @@ h3 {
     padding: 1rem;
   }
 
+  .topbar {
+    position: static;
+    top: auto;
+    grid-template-columns: minmax(0, 1fr) auto;
+    grid-template-areas:
+      "brand menu"
+      "actions actions";
+    gap: 0.65rem;
+    padding: 0.8rem 0.9rem;
+    border-radius: 22px;
+  }
+
+  .topbar-main {
+    grid-area: brand;
+  }
+
+  .topbar-main .eyebrow {
+    display: none;
+  }
+
+  .topbar-main strong {
+    display: block;
+    max-width: 100%;
+    font-size: 1rem;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+  }
+
+  .topbar-actions {
+    grid-area: actions;
+    width: 100%;
+    flex-wrap: nowrap;
+    overflow-x: auto;
+    justify-content: flex-start;
+    padding-bottom: 0.1rem;
+  }
+
+  .topbar-actions .toolbar-button,
+  .view-switch .toolbar-button,
+  .topbar-menu-shell > .toolbar-button {
+    white-space: nowrap;
+    padding: 0.6rem 0.85rem;
+  }
+
+  .view-switch {
+    flex: 0 0 auto;
+    min-width: max-content;
+  }
+
+  .topbar-menu-shell {
+    grid-area: menu;
+    justify-self: end;
+  }
+
+  .topbar-menu {
+    width: min(320px, calc(100vw - 1.5rem));
+  }
+
   .workspace-grid.library-collapsed {
     grid-template-columns: 1fr;
   }
