@@ -543,6 +543,7 @@ h3 {
   border: 1px solid var(--line);
   border-radius: 22px;
   cursor: grab;
+  touch-action: none;
 }
 
 .waveform-base {
@@ -572,6 +573,21 @@ h3 {
 .region-marker {
   stroke: var(--amber);
   stroke-width: 4;
+}
+
+.region-handle {
+  fill: rgba(255, 184, 111, 0.26);
+  stroke: rgba(255, 184, 111, 0.78);
+  stroke-width: 2;
+}
+
+.region-handle-hitbox {
+  fill: rgba(255, 184, 111, 0.001);
+}
+
+.region-handle.draggable,
+.region-handle-hitbox.draggable {
+  cursor: ew-resize;
 }
 
 .region-marker.draggable {

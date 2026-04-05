@@ -379,6 +379,9 @@ export default function App() {
   const [waveWindowSeconds, setWaveWindowSeconds] = useState(12);
   const [wavePan, setWavePan] = useState(0);
   const [dragState, setDragState] = useState<DragState>(null);
+  const [coarsePointer, setCoarsePointer] = useState(
+    () => typeof window !== "undefined" && window.matchMedia("(pointer: coarse)").matches,
+  );
   const [topMenuOpen, setTopMenuOpen] = useState(false);
   const [libraryCollapsed, setLibraryCollapsed] = useState(false);
   const [timingDraft, setTimingDraft] = useState({ start: "0.00", end: "0.00" });
@@ -498,6 +501,21 @@ export default function App() {
   useEffect(() => {
     appStateRef.current = appState;
   }, [appState]);
+
+  useEffect(() => {
+    if (typeof window === "undefined") {
+      return;
+    }
+
+    const mediaQuery = window.matchMedia("(pointer: coarse)");
+    const update = () => setCoarsePointer(mediaQuery.matches);
+    update();
+
+    mediaQuery.addEventListener("change", update);
+    return () => {
+      mediaQuery.removeEventListener("change", update);
+    };
+  }, []);
 
   useEffect(() => {
     textDraftRef.current = textDraft;
@@ -1639,6 +1657,11 @@ export default function App() {
     setDragState({ kind: "pan", pointerId, startX: clientX, initialPan: wavePan });
   }
 
+  function retainPointer(target: EventTarget | null, pointerId: number) {
+    const element = target as Element & { setPointerCapture?: (nextPointerId: number) => void };
+    element.setPointerCapture?.(pointerId);
+  }
+
   function startMarkerDrag(kind: "start" | "end", pointerId: number) {
     if (!canEdit) {
       return;
@@ -2384,6 +2407,10 @@ export default function App() {
   const headerSuffix = selectedTitle ? getTitleHeaderSuffix(selectedTitle) : "";
   const waveformWidth = 760;
   const waveformHeight = 180;
+  const waveformHandleGripWidth = coarsePointer ? 36 : 14;
+  const waveformHandleHitboxWidth = coarsePointer ? 96 : 28;
+  const waveformHandleY = 20;
+  const waveformHandleHeight = waveformHeight - 40;
   const regionStart =
     selectedPhrase && selectedTitle ? ((selectedPhrase.start - visibleStart) / viewRange) * waveformWidth : 0;
   const regionEnd =
@@ -2803,7 +2830,10 @@ export default function App() {
                   ref={waveformRef}
                   className="waveform"
                   viewBox={`0 0 ${waveformWidth} ${waveformHeight}`}
-                  onPointerDown={(event) => startPan(event.pointerId, event.clientX)}
+                  onPointerDown={(event) => {
+                    retainPointer(event.currentTarget, event.pointerId);
+                    startPan(event.pointerId, event.clientX);
+                  }}
                   role="img"
                   aria-label="Waveform editor"
                 >
@@ -2850,15 +2880,64 @@ export default function App() {
                         rx="14"
                         className="region-fill"
                       />
+                      <rect
+                        x={clamp(regionStart - waveformHandleHitboxWidth / 2, 0, waveformWidth - waveformHandleHitboxWidth)}
+                        y={12}
+                        width={waveformHandleHitboxWidth}
+                        height={waveformHeight - 24}
+                        rx={Math.max(10, waveformHandleGripWidth)}
+                        className={`region-handle-hitbox ${canEdit ? "draggable" : ""}`}
+                        onPointerDown={(event) => {
+                          event.stopPropagation();
+                          retainPointer(event.currentTarget, event.pointerId);
+                          startMarkerDrag("start", event.pointerId);
+                        }}
+                      />
+                      <rect
+                        x={clamp(regionStart - waveformHandleGripWidth / 2, 0, waveformWidth - waveformHandleGripWidth)}
+                        y={waveformHandleY}
+                        width={waveformHandleGripWidth}
+                        height={waveformHandleHeight}
+                        rx={Math.max(8, waveformHandleGripWidth / 2)}
+                        className={`region-handle ${canEdit ? "draggable" : ""}`}
+                        onPointerDown={(event) => {
+                          event.stopPropagation();
+                          retainPointer(event.currentTarget, event.pointerId);
+                          startMarkerDrag("start", event.pointerId);
+                        }}
+                      />
                       <line
                         x1={clamp(regionStart, 0, waveformWidth)}
                         x2={clamp(regionStart, 0, waveformWidth)}
                         y1={16}
                         y2={waveformHeight - 16}
                         className={`region-marker ${canEdit ? "draggable" : ""}`}
+                        pointerEvents="none"
+                      />
+                      <rect
+                        x={clamp(regionEnd - waveformHandleHitboxWidth / 2, 0, waveformWidth - waveformHandleHitboxWidth)}
+                        y={12}
+                        width={waveformHandleHitboxWidth}
+                        height={waveformHeight - 24}
+                        rx={Math.max(10, waveformHandleGripWidth)}
+                        className={`region-handle-hitbox ${canEdit ? "draggable" : ""}`}
                         onPointerDown={(event) => {
                           event.stopPropagation();
-                          startMarkerDrag("start", event.pointerId);
+                          retainPointer(event.currentTarget, event.pointerId);
+                          startMarkerDrag("end", event.pointerId);
+                        }}
+                      />
+                      <rect
+                        x={clamp(regionEnd - waveformHandleGripWidth / 2, 0, waveformWidth - waveformHandleGripWidth)}
+                        y={waveformHandleY}
+                        width={waveformHandleGripWidth}
+                        height={waveformHandleHeight}
+                        rx={Math.max(8, waveformHandleGripWidth / 2)}
+                        className={`region-handle ${canEdit ? "draggable" : ""}`}
+                        onPointerDown={(event) => {
+                          event.stopPropagation();
+                          retainPointer(event.currentTarget, event.pointerId);
+                          startMarkerDrag("end", event.pointerId);
                         }}
                       />
                       <line
@@ -2867,10 +2946,7 @@ export default function App() {
                         y1={16}
                         y2={waveformHeight - 16}
                         className={`region-marker ${canEdit ? "draggable" : ""}`}
-                        onPointerDown={(event) => {
-                          event.stopPropagation();
-                          startMarkerDrag("end", event.pointerId);
-                        }}
+                        pointerEvents="none"
                       />
                     </>
                   ) : null}
