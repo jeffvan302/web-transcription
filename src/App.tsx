@@ -2543,7 +2543,7 @@ export default function App() {
             </button>
           </div>
           {appState.currentView !== "editor" ? (
-            <button className="toolbar-button" onClick={reloadLibrary} type="button">
+            <button className="toolbar-button header-utility-button" onClick={reloadLibrary} type="button">
               Refresh
             </button>
           ) : null}
@@ -2580,15 +2580,31 @@ export default function App() {
                 </small>
               </div>
               <button
+                className="toolbar-button"
+                onClick={() => {
+                  setTopMenuOpen(false);
+                  reloadLibrary();
+                }}
+                type="button"
+              >
+                Refresh
+              </button>
+              <button
                 className={`toolbar-button ${appState.currentView === "settings" ? "selected-view" : ""}`}
-                onClick={() => switchView("settings")}
+                onClick={() => {
+                  setTopMenuOpen(false);
+                  switchView("settings");
+                }}
                 type="button"
               >
                 {currentUser.role === "admin" ? "Account / Admin" : "Account"}
               </button>
               <button
                 className={`toolbar-button ${appState.currentView === "import" ? "selected-view" : ""}`}
-                onClick={() => switchView("import")}
+                onClick={() => {
+                  setTopMenuOpen(false);
+                  switchView("import");
+                }}
                 type="button"
                 disabled={passwordChangeRequired}
               >
@@ -2622,6 +2638,31 @@ export default function App() {
           ) : null}
         </div>
       </header>
+
+      <nav className="mobile-bottom-nav" aria-label="Primary mobile navigation">
+        <button
+          className={`toolbar-button ${appState.currentView === "shared" ? "selected-view" : ""}`}
+          onClick={() => switchView("shared")}
+          type="button"
+          disabled={passwordChangeRequired}
+        >
+          Library
+        </button>
+        <button
+          className={`toolbar-button ${appState.currentView === "editor" ? "selected-view" : ""}`}
+          onClick={() => {
+            if (activeCheckedOutTitle) {
+              void selectTitle(activeCheckedOutTitle.id);
+              return;
+            }
+            switchView("editor");
+          }}
+          type="button"
+          disabled={passwordChangeRequired || (!activeCheckedOutTitle && !selectedTitle)}
+        >
+          Editor
+        </button>
+      </nav>
 
       <input ref={asrImportInputRef} type="file" accept=".asr,.zip" hidden onChange={handleAsrImportChange} />
 

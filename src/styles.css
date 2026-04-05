@@ -372,6 +372,10 @@ h3 {
   gap: 0.7rem;
 }
 
+.mobile-bottom-nav {
+  display: none;
+}
+
 .user-chip small,
 .title-meta,
 .helper-text,
@@ -870,13 +874,15 @@ h3 {
     padding: 1rem;
   }
 
+  .app-shell {
+    padding-bottom: calc(6.25rem + env(safe-area-inset-bottom));
+  }
+
   .topbar {
     position: static;
     top: auto;
-    grid-template-columns: minmax(0, 1fr) auto;
-    grid-template-areas:
-      "brand menu"
-      "actions actions";
+    grid-template-columns: minmax(0, 1fr) auto auto;
+    grid-template-areas: "brand actions menu";
     gap: 0.65rem;
     padding: 0.8rem 0.9rem;
     border-radius: 22px;
@@ -901,11 +907,11 @@ h3 {
 
   .topbar-actions {
     grid-area: actions;
-    width: 100%;
+    width: auto;
     flex-wrap: nowrap;
-    overflow-x: auto;
-    justify-content: flex-start;
-    padding-bottom: 0.1rem;
+    overflow: visible;
+    justify-content: flex-end;
+    padding-bottom: 0;
   }
 
   .topbar-actions .toolbar-button,
@@ -916,8 +922,11 @@ h3 {
   }
 
   .view-switch {
-    flex: 0 0 auto;
-    min-width: max-content;
+    display: none;
+  }
+
+  .header-utility-button {
+    display: none;
   }
 
   .topbar-menu-shell {
@@ -927,6 +936,28 @@ h3 {
 
   .topbar-menu {
     width: min(320px, calc(100vw - 1.5rem));
+  }
+
+  .mobile-bottom-nav {
+    position: fixed;
+    left: 1rem;
+    right: 1rem;
+    bottom: calc(0.75rem + env(safe-area-inset-bottom));
+    z-index: 24;
+    display: grid;
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    gap: 0.65rem;
+    padding: 0.7rem;
+    border: 1px solid var(--line);
+    border-radius: 24px;
+    background: rgba(8, 13, 20, 0.94);
+    backdrop-filter: blur(18px);
+    box-shadow: var(--shadow);
+  }
+
+  .mobile-bottom-nav .toolbar-button {
+    justify-content: center;
+    padding: 0.72rem 0.85rem;
   }
 
   .workspace-grid.library-collapsed {
