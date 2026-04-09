@@ -198,6 +198,80 @@ function buildLanguageSuggestions(...sources: Array<readonly string[] | null | u
   );
 }
 
+// --- Phase 1: Bottom sheet drag handlers ---
+function getSheetSnapPosition(snap: "closed" | "half" | "full", vh: number) {
+  if (snap === "closed") return vh - 64;
+  if (snap === "half") return vh * 0.5;
+  return vh - 80; // "full"
+}
+
+function handleSheetDragStart(clientY: number, startOffset: number) {
+  setIsDraggingSheet(true);
+  sheetDragRef.current = { startY: clientY, startOffset };
+}
+
+function handleSheetDragMove(clientY: number, startOffset: number) {
+  if (!sheetDragRef.current) return;
+  const delta = clientY - sheetDragRef.current.startY;
+  const vh = window.innerHeight;
+  const newOffset = sheetDragRef.current.startOffset + delta;
+  setPhraseSheetOffset(Math.max(vh - 64, Math.min(vh - 80, newOffset)));
+}
+
+function handleSheetDragEnd() {
+  if (!sheetDragRef.current) return;
+  setIsDraggingSheet(false);
+  const vh = window.innerHeight;
+  const pos = phraseSheetOffset;
+  const half = vh * 0.5;
+  const full = vh - 80;
+  const closed = vh - 64;
+  const nearest = [
+    [Math.abs(pos - half), "half"],
+    [Math.abs(pos - full), "full"],
+    [Math.abs(pos - closed), "closed"],
+  ]
+    .sort((a, b) => a[0] - b[0])[0][1] as "half" | "full" | "closed";
+  setPhraseSheetSnap(nearest);
+  sheetDragRef.current = null;
+}
+
+// --- Phase 2: Pinch-to-zoom helpers ---
+function getPinchDistance(touches: TouchList) {
+  if (touches.length < 2) return 0;
+  return Math.hypot(touches[0].clientX - touches[1].clientX, touches[0].clientY - touches[1].clientY);
+}
+
+function handleWaveformTouchStart(e: TouchEvent, currentZoom: number, setIsPinch: (v: boolean) => void, setZoom: (z: number) => void) {
+  if (e.touches.length === 2) {
+    e.preventDefault();
+    setIsPinch(true);
+    pinchInitialDistance.current = getPinchDistance(e.touches);
+    pinchInitialZoom.current = currentZoom;
+  }
+}
+
+function handleWaveformTouchMove(
+  e: TouchEvent,
+  currentZoom: number,
+  isPinch: boolean,
+  setZoom: (z: number) => void,
+  currentWindow: number,
+  updateWindow: (w: number) => void,
+) {
+  if (!isPinch || e.touches.length < 2 || pinchInitialDistance.current === null) return;
+  e.preventDefault();
+  const scale = getPinchDistance(e.touches) / pinchInitialDistance.current;
+  const newZoom = Math.min(4, Math.max(1, pinchInitialZoom.current * scale));
+  setZoom(newZoom);
+  updateWindow(currentWindow / scale);
+}
+
+function handleWaveformTouchEnd(setIsPinch: (v: boolean) => void) {
+  setIsPinch(false);
+  pinchInitialDistance.current = null;
+}
+
 const MIN_WAVE_WINDOW_SECONDS = 1;
 const MAX_WAVE_WINDOW_SECONDS = 45;
 
@@ -418,6 +492,16 @@ export default function App() {
   const [storageAccessKeyId, setStorageAccessKeyId] = useState("");
   const [storageSecretAccessKey, setStorageSecretAccessKey] = useState("");
 
+  // --- Phase 1: Mobile bottom sheet + library overlay ---
+  const [phraseSheetSnap, setPhraseSheetSnap] = useState<"closed" | "half" | "full">("half");
+  const [phraseSheetOffset, setPhraseSheetOffset] = useState(0);
+  const [libraryOverlayOpen, setLibraryOverlayOpen] = useState(false);
+  const [isDraggingSheet, setIsDraggingSheet] = useState(false);
+
+  // --- Phase 2: Waveform pinch-to-zoom ---
+  const [waveformZoom, setWaveformZoom] = useState(1);
+  const [isPinchGesture, setIsPinchGesture] = useState(false);
+
   const textareaRef = useRef<HTMLTextAreaElement | null>(null);
   const waveformRef = useRef<SVGSVGElement | null>(null);
   const audioRef = useRef<HTMLAudioElement | null>(null);
@@ -434,6 +518,9 @@ export default function App() {
   const playbackCommandRef = useRef<"pause" | "stop" | "phrase-end" | null>(null);
   const lastUserActivityAtRef = useRef(Date.now());
   const lastReportedActivityAtRef = useRef(0);
+  const sheetDragRef = useRef<{ startY: number; startOffset: number } | null>(null);
+  const pinchInitialDistance = useRef<number | null>(null);
+  const pinchInitialZoom = useRef<number>(1);
 
   const currentUser = appState.users.find((user) => user.id === appState.sessionUserId) ?? null;
   const selectedWorkspace =
@@ -2407,8 +2494,8 @@ export default function App() {
   const headerSuffix = selectedTitle ? getTitleHeaderSuffix(selectedTitle) : "";
   const waveformWidth = 760;
   const waveformHeight = 180;
-  const waveformHandleGripWidth = coarsePointer ? 36 : 14;
-  const waveformHandleHitboxWidth = coarsePointer ? 96 : 28;
+  const waveformHandleGripWidth = coarsePointer ? 48 : 14;
+  const waveformHandleHitboxWidth = coarsePointer ? 112 : 28;
   const waveformHandleY = 20;
   const waveformHandleHeight = waveformHeight - 40;
   const regionStart =
@@ -2668,12 +2755,19 @@ export default function App() {
 
       <nav className="mobile-bottom-nav" aria-label="Primary mobile navigation">
         <button
-          className={`toolbar-button ${appState.currentView === "shared" ? "selected-view" : ""}`}
-          onClick={() => switchView("shared")}
+          className={`toolbar-button ${libraryOverlayOpen || appState.currentView === "shared" ? "selected-view" : ""}`}
+          onClick={() => {
+            if (window.innerWidth <= 720) {
+              setLibraryOverlayOpen(true);
+            } else {
+              switchView("shared");
+            }
+          }}
           type="button"
           disabled={passwordChangeRequired}
         >
-          Library
+          <span className="nav-icon">&#128218;</span>
+          <span className="nav-btn-label">Library</span>
         </button>
         <button
           className={`toolbar-button ${appState.currentView === "editor" ? "selected-view" : ""}`}
@@ -2687,13 +2781,58 @@ export default function App() {
           type="button"
           disabled={passwordChangeRequired || (!activeCheckedOutTitle && !selectedTitle)}
         >
-          Editor
+          <span className="nav-icon">&#9998;</span>
+          <span className="nav-btn-label">Editor</span>
+        </button>
+        <button
+          className={`toolbar-button ${appState.currentView === "import" ? "selected-view" : ""}`}
+          onClick={() => switchView("import")}
+          type="button"
+          disabled={passwordChangeRequired}
+        >
+          <span className="nav-icon">&#8686;</span>
+          <span className="nav-btn-label">Import</span>
+        </button>
+        <button
+          className={`toolbar-button ${appState.currentView === "settings" ? "selected-view" : ""}`}
+          onClick={() => switchView("settings")}
+          type="button"
+          disabled={passwordChangeRequired}
+        >
+          <span className="nav-icon">&#9881;</span>
+          <span className="nav-btn-label">Settings</span>
         </button>
       </nav>
 
       <input ref={asrImportInputRef} type="file" accept=".asr,.zip" hidden onChange={handleAsrImportChange} />
 
       {appState.currentView === "editor" && selectedTitle ? (
+        <>
+          {/* Phase 3: Mobile fixed playback controls strip */}
+          <div className="mobile-playback-strip" aria-label="Playback controls">
+            <span className="playback-time">
+              {playheadTime !== null ? formatTime(playheadTime) : "--:--"}
+            </span>
+            <button className="toolbar-button" onClick={() => play("stopped")} type="button">
+              Stop
+            </button>
+            <button
+              className="toolbar-button primary"
+              onClick={() => play(playbackState === "playing" ? "paused" : "playing")}
+              type="button"
+            >
+              {playbackState === "playing" ? "Pause" : "Play"}
+            </button>
+            <button
+              className={`toolbar-button ${loopPlayback ? "playback-loop-active" : ""}`}
+              onClick={() => setLoopPlayback((current) => !current)}
+              type="button"
+            >
+              Loop
+            </button>
+            <span className="eyebrow">{playbackSpeed.toFixed(2)}x</span>
+          </div>
+
         <section className={`workspace-grid ${libraryCollapsed ? "library-collapsed" : ""}`}>
           {libraryCollapsed ? (
             <aside className="library-rail" aria-label="Collapsed titles panel">
@@ -2824,16 +2963,50 @@ export default function App() {
                       />
                     </label>
                   </div>
+
+                  {/* Mobile pinch-to-zoom buttons */}
+                  <div className="button-row waveform-zoom-controls">
+                    <button
+                      className="toolbar-button"
+                      onClick={() => {
+                        const nz = Math.min(4, waveformZoom * 1.25);
+                        setWaveformZoom(nz);
+                        if (selectedTitle) updateWaveWindow(waveWindowSeconds / 1.25);
+                      }}
+                      type="button"
+                      disabled={waveformZoom >= 4}
+                    >
+                      +
+                    </button>
+                    <span className="eyebrow">{Math.round(waveformZoom * 100)}%</span>
+                    <button
+                      className="toolbar-button"
+                      onClick={() => {
+                        const nz = Math.max(1, waveformZoom / 1.25);
+                        setWaveformZoom(nz);
+                        if (selectedTitle) updateWaveWindow(waveWindowSeconds * 1.25);
+                      }}
+                      type="button"
+                      disabled={waveformZoom <= 1}
+                    >
+                      −
+                    </button>
+                  </div>
                 </div>
 
                 <svg
                   ref={waveformRef}
-                  className="waveform"
+                  className={`waveform ${isPinchGesture ? "waveform-pinching" : ""}`}
                   viewBox={`0 0 ${waveformWidth} ${waveformHeight}`}
                   onPointerDown={(event) => {
-                    retainPointer(event.currentTarget, event.pointerId);
-                    startPan(event.pointerId, event.clientX);
+                    if (!isPinchGesture) {
+                      retainPointer(event.currentTarget, event.pointerId);
+                      startPan(event.pointerId, event.clientX);
+                    }
                   }}
+                  onTouchStart={(e) => handleWaveformTouchStart(e, waveformZoom, setIsPinchGesture, setWaveformZoom)}
+                  onTouchMove={(e) => handleWaveformTouchMove(e, waveformZoom, isPinchGesture, setWaveformZoom, waveWindowSeconds, updateWaveWindow)}
+                  onTouchEnd={() => handleWaveformTouchEnd(setIsPinchGesture)}
                   role="img"
                   aria-label="Waveform editor"
                 >
@@ -3086,70 +3259,97 @@ export default function App() {
             </div>
           </section>
 
-          <aside className="panel phrase-panel">
-            <div className="panel-header">
-              <div>
-                <span className="eyebrow">Phrase List</span>
-                <h2>Sentences</h2>
-              </div>
-              <span className="pill">{selectedTitle.phrases.length} rows</span>
+          {/* Mobile bottom sheet for phrase list */}
+          <aside
+            className={`phrase-sheet ${phraseSheetSnap}`}
+            style={{ "--sheet-offset": `${phraseSheetOffset}px` } as React.CSSProperties}
+          >
+            {/* Drag handle */}
+            <div
+              className="sheet-drag-handle"
+              onPointerDown={(e) => {
+                e.preventDefault();
+                handleSheetDragStart(e.clientY, phraseSheetOffset);
+              }}
+              onPointerMove={(e) => {
+                if (isDraggingSheet) handleSheetDragMove(e.clientY, phraseSheetOffset);
+              }}
+              onPointerUp={() => {
+                if (isDraggingSheet) handleSheetDragEnd();
+              }}
+              onPointerCancel={() => {
+                if (isDraggingSheet) handleSheetDragEnd();
+              }}
+            >
+              <div className="sheet-drag-grip" />
             </div>
 
-            <div className="phrase-table">
-              <div className="phrase-head">
-                <span>Sentence</span>
-                <span>Start</span>
-                <span>End</span>
-                <span>Use</span>
-                <span>Reviewed</span>
+            <div className="sheet-content">
+              <div className="panel-header">
+                <div>
+                  <span className="eyebrow">Phrase List</span>
+                  <h2>Sentences</h2>
+                </div>
+                <span className="pill">{selectedTitle.phrases.length} rows</span>
               </div>
-              {selectedTitle.phrases.map((phrase) => {
-                const selected = appState.selectedPhraseIds.includes(phrase.id);
-                const rowClass = phrase.enabled
-                  ? phrase.reviewed
-                    ? "reviewed"
-                    : "normal"
-                  : phrase.reviewed
-                    ? "disabled-reviewed"
-                    : "disabled";
-                return (
-                  <button
-                    key={phrase.id}
-                    className={`phrase-row ${rowClass} ${selected ? "selected" : ""}`}
-                    onClick={(event) => void selectPhrase(phrase.id, event.metaKey || event.ctrlKey)}
-                    type="button"
-                  >
-                    <span>{phrase.text}</span>
-                    <span>{phrase.start.toFixed(2)}</span>
-                    <span>{phrase.end.toFixed(2)}</span>
-                    <label className="mini-check">
-                      <input
-                        type="checkbox"
-                        checked={phrase.enabled}
-                        disabled={!canEdit}
-                        onChange={(event) => {
-                          event.stopPropagation();
-                          void toggleFlag("enabled", phrase.id);
-                        }}
-                      />
-                    </label>
-                    <label className="mini-check">
-                      <input
-                        type="checkbox"
-                        checked={phrase.reviewed}
-                        disabled={!canEdit}
-                        onChange={(event) => {
-                          event.stopPropagation();
-                          void toggleFlag("reviewed", phrase.id);
-                        }}
-                      />
-                    </label>
-                  </button>
-                );
-              })}
+
+              <div className="phrase-table">
+                <div className="phrase-head">
+                  <span>Sentence</span>
+                  <span>Start</span>
+                  <span>End</span>
+                  <span>Use</span>
+                  <span>Reviewed</span>
+                </div>
+                {selectedTitle.phrases.map((phrase) => {
+                  const selected = appState.selectedPhraseIds.includes(phrase.id);
+                  const rowClass = phrase.enabled
+                    ? phrase.reviewed
+                      ? "reviewed"
+                      : "normal"
+                    : phrase.reviewed
+                      ? "disabled-reviewed"
+                      : "disabled";
+                  return (
+                    <button
+                      key={phrase.id}
+                      className={`phrase-row ${rowClass} ${selected ? "selected" : ""}`}
+                      onClick={(event) => void selectPhrase(phrase.id, event.metaKey || event.ctrlKey)}
+                      type="button"
+                    >
+                      <span>{phrase.text}</span>
+                      <span>{phrase.start.toFixed(2)}</span>
+                      <span>{phrase.end.toFixed(2)}</span>
+                      <label className="mini-check">
+                        <input
+                          type="checkbox"
+                          checked={phrase.enabled}
+                          disabled={!canEdit}
+                          onChange={(event) => {
+                            event.stopPropagation();
+                            void toggleFlag("enabled", phrase.id);
+                          }}
+                        />
+                      </label>
+                      <label className="mini-check">
+                        <input
+                          type="checkbox"
+                          checked={phrase.reviewed}
+                          disabled={!canEdit}
+                          onChange={(event) => {
+                            event.stopPropagation();
+                            void toggleFlag("reviewed", phrase.id);
+                          }}
+                        />
+                      </label>
+                    </button>
+                  );
+                })}
+              </div>
             </div>
           </aside>
         </section>
+        </>
       ) : null}
       {appState.currentView === "shared" ? (
         <section className="view-panel">
@@ -3377,6 +3577,153 @@ export default function App() {
           </div>
         </section>
       ) : null}
+
+      {/* Phase 1/4: Mobile full-screen library overlay */}
+      {libraryOverlayOpen ? (
+        <div className="library-overlay" role="dialog" aria-modal="true" aria-label="Title library">
+          <button
+            className="toolbar-button library-overlay-close"
+            onClick={() => setLibraryOverlayOpen(false)}
+            type="button"
+          >
+            Close
+          </button>
+
+          <section className="view-panel">
+            <div className="panel-header">
+              <div>
+                <span className="eyebrow">Library</span>
+                <h2>Titles</h2>
+              </div>
+              <span className="pill">{filteredCloudTitles.length} items</span>
+            </div>
+
+            <div className="cloud-list-toolbar">
+              <label className="field">
+                <span>Search</span>
+                <input
+                  value={cloudListFilter}
+                  onChange={(event) => setCloudListFilter(event.target.value)}
+                  placeholder="Filter titles..."
+                />
+              </label>
+            </div>
+
+            <div className="title-list">
+              {filteredCloudTitles.map((title) => {
+                const checkoutOwner = title.checkedOutByUserId
+                  ? appState.users.find((user) => user.id === title.checkedOutByUserId)?.displayName ?? "Unknown user"
+                  : null;
+                const checkoutStateClass =
+                  title.checkedOutByUserId === currentUser?.id
+                    ? "checked-out-self"
+                    : title.checkedOutByUserId
+                      ? "checked-out-other locked"
+                      : "checked-in";
+                return (
+                  <button
+                    key={title.id}
+                    className={`title-card ${selectedTitle?.id === title.id ? "active" : ""} ${checkoutStateClass}`}
+                    onClick={() => {
+                      void focusSharedTitle(title.id);
+                      // On mobile, close overlay and go to editor
+                      if (window.innerWidth <= 720) {
+                        setLibraryOverlayOpen(false);
+                        switchView("editor");
+                      }
+                    }}
+                    type="button"
+                  >
+                    <div className="title-card-top">
+                      <strong>{title.title || title.videoId}</strong>
+                      <span className={`pill ${title.checkedOutByUserId ? "accent" : ""}`}>
+                        {getTitleStateLabel(title)}
+                      </span>
+                    </div>
+                    <span>{title.source}</span>
+                    <div className="title-meta">
+                      <span>{title.videoId}</span>
+                      <span>{title.sizeLabel}</span>
+                    </div>
+                    <div className="title-meta">
+                      <span>{checkoutOwner ? `Locked by ${checkoutOwner}` : "Available"}</span>
+                    </div>
+                  </button>
+                );
+              })}
+            </div>
+
+            {selectedTitle && (
+              <article className="library-detail-card">
+                <div className="card-header">
+                  <div>
+                    <span className="eyebrow">Selected Title</span>
+                    <h3>{selectedTitle.title || selectedTitle.videoId}</h3>
+                  </div>
+                  <span className={`pill ${selectedTitle.checkedOutByUserId ? "accent" : ""}`}>
+                    {getTitleStateLabel(selectedTitle)}
+                  </span>
+                </div>
+                <dl className="library-detail-grid">
+                  <div>
+                    <dt>Video ID</dt>
+                    <dd>{selectedTitle.videoId}</dd>
+                  </div>
+                  <div>
+                    <dt>Source</dt>
+                    <dd>{selectedTitle.source}</dd>
+                  </div>
+                  <div>
+                    <dt>Language</dt>
+                    <dd>{selectedTitle.language}</dd>
+                  </div>
+                  <div>
+                    <dt>Duration</dt>
+                    <dd>{formatTime(selectedTitle.duration)}</dd>
+                  </div>
+                  <div>
+                    <dt>Size</dt>
+                    <dd>{selectedTitle.sizeLabel}</dd>
+                  </div>
+                  <div>
+                    <dt>Phrases</dt>
+                    <dd>{selectedTitle.phrases.length}</dd>
+                  </div>
+                </dl>
+                <div className="button-row">
+                  {selectedTitle.checkedOutByUserId === currentUser?.id ? (
+                    <button
+                      className="toolbar-button"
+                      onClick={() => {
+                        void selectTitle(selectedTitle.id);
+                        setLibraryOverlayOpen(false);
+                        switchView("editor");
+                      }}
+                      type="button"
+                    >
+                      Continue Editing
+                    </button>
+                  ) : selectedTitle.checkedOutByUserId ? (
+                    <button className="toolbar-button" disabled type="button">
+                      Locked by{" "}
+                      {appState.users.find((u) => u.id === selectedTitle.checkedOutByUserId)?.displayName ?? "another user"}
+                    </button>
+                  ) : (
+                    <button
+                      className="toolbar-button primary"
+                      onClick={() => void checkoutTitle(selectedTitle.id)}
+                      type="button"
+                    >
+                      Check Out
+                    </button>
+                  )}
+                </div>
+              </article>
+            )}
+          </section>
+        </div>
+      ) : null}
+
       {appState.currentView === "import" ? (
         <section className="view-panel">
           <div className="panel-header">
