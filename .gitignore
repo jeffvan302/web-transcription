@@ -6,3 +6,13 @@ dist/
 .DS_Store
 Thumbs.db
 data/
+!.env.example
+
+# Local test and debug output
+data-*/
+test-results/
+*-cookie.txt
+*.log
+
+# Local editor/agent settings
+.claude/settings.local.json

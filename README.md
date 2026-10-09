@@ -55,7 +55,9 @@ In non-production mode, the database seeds these development users on first star
 - `jordan` / `jordan1234`
 - `theo` / `admin1234`
 
-In production, a bootstrap admin account is created by default as `admin` / `password`, and it is flagged to change the password on first sign-in. You can override that bootstrap account through environment variables such as:
+These accounts are for local development only and are never created in production.
+
+In production, a single bootstrap admin account is created on first startup. If `BOOTSTRAP_ADMIN_PASSWORD` is not set, the server generates a random one-time password and prints it once to the server log; the account is flagged to change its password on first sign-in. You can configure the bootstrap account through environment variables such as:
 
 - `BOOTSTRAP_ADMIN_LOGIN_IDENTITY`
 - `BOOTSTRAP_ADMIN_EMAIL`
@@ -104,7 +106,7 @@ If neither backend is available, uploaded/imported titles without subtitles are 
 
 ## Railway Deployment
 
-This repo is now set up for Railway with the included [`railway.json`](/C:/Users/TheunisvanNiekerk/Code/Web_Transcription/railway.json), Docker build, and `/api/health` endpoint.
+This repo is now set up for Railway with the included [`railway.json`](railway.json), Docker build, and `/api/health` endpoint.
 
 Recommended setup:
 
@@ -141,4 +143,4 @@ node .\scripts\smoke-test.mjs --start-server
 
 ## Container Runtime
 
-The included [`Dockerfile`](/C:/Users/TheunisvanNiekerk/Code/Web_Transcription/Dockerfile) builds the frontend and runs the Node server on port `3000`, which is suitable for Railway-style deployment.
+The included [`Dockerfile`](Dockerfile) builds the frontend and runs the Node server on port `3000`, which is suitable for Railway-style deployment.
