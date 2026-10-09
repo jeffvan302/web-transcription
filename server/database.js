@@ -297,12 +297,21 @@ function seedUsersIfNeeded() {
       continue;
     }
 
+    let password = user.password;
+    if (!password) {
+      password = crypto.randomBytes(18).toString("base64url");
+      console.log(
+        `[bootstrap] Created admin account "${normalizedLoginIdentity}" with one-time password: ${password}\n` +
+          "[bootstrap] Sign in and change it now. Set BOOTSTRAP_ADMIN_PASSWORD to choose your own instead.",
+      );
+    }
+
     insertUserStatement.run({
       id: randomId("user"),
       email: normalizedEmail,
       loginIdentity: normalizedLoginIdentity,
       displayName: user.displayName,
-      passwordHash: bcrypt.hashSync(user.password, 12),
+      passwordHash: bcrypt.hashSync(password, 12),
       role: user.role,
       status: user.status || "active",
       mustChangePassword: user.mustChangePassword ? 1 : 0,

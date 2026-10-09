@@ -1,4 +1,0 @@
-[dotenv@17.3.1] injecting env (0) from .env -- tip: ⚙️  enable debug logging with { debug: true }
-yt-asr server listening on http://localhost:3001
-[dotenv@17.3.1] injecting env (0) from .env -- tip: ⚙️  override existing env vars with { override: true }
-yt-asr server listening on http://localhost:3001

@@ -114,7 +114,9 @@ const fallbackBootstrapAdmin = {
   email: process.env.BOOTSTRAP_ADMIN_EMAIL || "admin@yt-asr.local",
   displayName: process.env.BOOTSTRAP_ADMIN_DISPLAY_NAME || "Administrator",
   role: "admin",
-  password: process.env.BOOTSTRAP_ADMIN_PASSWORD || "password",
+  // No hardcoded production default: when BOOTSTRAP_ADMIN_PASSWORD is unset,
+  // database.js generates a random one-time password and prints it to the server log.
+  password: process.env.BOOTSTRAP_ADMIN_PASSWORD || null,
   mustChangePassword: true,
 };
 
